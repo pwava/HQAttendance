@@ -133,7 +133,7 @@ function syncDirectoryNamesToAllTabs() {
 
   // --- For each sheet, append any missing names from Directory ---
   SHEETS_CONFIG.forEach(function (cfg) {
-    const sheet = ss.getSheetByName(cfg.name);
+    const sheet = getSheetByNameLoose_(ss, cfg.name);
     if (!sheet) {
       Logger.log("Sheet '" + cfg.name + "' not found. Skipping.");
       return;
@@ -209,9 +209,9 @@ function syncDirectoryNamesToAllTabs() {
       sheet.getRange(appendStartRow, 1, rowsToAppend.length, numCols)
         .setValues(rowsToAppend);
 
-      Logger.log("Sheet '" + cfg.name + "': appended " + rowsToAppend.length + " names from Directory.");
+      Logger.log("Sheet '" + sheet.getName() + "': appended " + rowsToAppend.length + " names from Directory.");
     } else {
-      Logger.log("Sheet '" + cfg.name + "': no new names needed.");
+      Logger.log("Sheet '" + sheet.getName() + "': no new names needed.");
     }
   });
 }
@@ -264,4 +264,34 @@ function extractSpreadsheetIdFromString_(input) {
   if (match && match[0]) return match[0];
 
   throw new Error('Could not extract Spreadsheet ID from: ' + input);
+}
+
+/**
+ * Loose sheet matcher:
+ * - tries exact getSheetByName first
+ * - then matches by normalized name (trim, collapse spaces, lowercase)
+ */
+function getSheetByNameLoose_(ss, targetName) {
+  const exact = ss.getSheetByName(targetName);
+  if (exact) return exact;
+
+  const normTarget = normalizeSheetName_(targetName);
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    const s = sheets[i];
+    if (normalizeSheetName_(s.getName()) === normTarget) {
+      return s;
+    }
+  }
+  return null;
+}
+
+/**
+ * Normalizes sheet names to avoid hidden-space/case issues.
+ */
+function normalizeSheetName_(name) {
+  return String(name || '')
+    .replace(/\s+/g, ' ')  // collapse any weird whitespace
+    .trim()
+    .toLowerCase();
 }
