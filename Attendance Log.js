@@ -41,21 +41,23 @@ function processAttendanceLogV2() {
   const pastoralRecentDateCol = 5;  // Column E
   const pastoralPreviousDateCol = 6; // Column F
   const pastoralNotesCol = 7; // Column G
+  const pastoralExtraCol = 8; // Column H (from Attendance Log Col L)
   
   // --- REFINEMENT ---
   // Column I (index 9) is used for "Logged" status
   const logStatusColumn = 9;  
   // Column J (index 10) is used for "Remarks"
   const logRemarksColumn = 10;
-  // Read from Col B (2) to Col K (11). 11 - 2 + 1 = 10 columns
-  const logNumColsToRead = 10;  
-  // --- Indices for the B:K logData array ---
+  // Read from Col B (2) to Col L (12). 12 - 2 + 1 = 11 columns
+  const logNumColsToRead = 11;  
+  // --- Indices for the B:L logData array ---
   const logLastNameIndex = 1;  // Col C
   const logFirstNameIndex = 2; // Col D
   const logTypeIndex = 3;      // Col E
   const logStatusColIndex = 7; // Index of Status (Col I)
   const logRemarksColIndex = 8; // Index of Remarks (Col J)
   const logNotesColIndex = 9; // Col K (Notes for Pastoral Check-In)
+  const logExtraColIndex = 10; // Col L (extra for Pastoral Check-In -> Col H)
   // --- END REFINEMENT ---
 
   const logSheet = ss.getSheetByName(logSheetName);
@@ -64,7 +66,7 @@ function processAttendanceLogV2() {
     return;
   }
 
-  // 1. Read all attendance log data at once (B:K)
+  // 1. Read all attendance log data at once (B:L)
   const logRange = logSheet.getRange(2, 2, logSheet.getLastRow() - 1, logNumColsToRead);  
   const logData = logRange.getValues();
   
@@ -126,6 +128,7 @@ function processAttendanceLogV2() {
         formattedFullDate: formattedFullDate, // M-D-YYYY
         formattedShortDate: formattedShortDate, // M-D
         notes: row[logNotesColIndex], // Col K
+        extra: row[logExtraColIndex], // Col L
         originalLogRownum: i + 2
       });
     }
@@ -190,7 +193,7 @@ function processAttendanceLogV2() {
   const processedLogs = new Set();
 
   for (const record of attendanceRecords) {
-    const { name, eventName, eventDate, formattedFullDate, formattedShortDate, notes } = record;
+    const { name, eventName, eventDate, formattedFullDate, formattedShortDate, notes, extra } = record;
     const logDataIndex = record.originalLogRownum - 2;
 
     // --- Check for duplicates IN THE LOG FILE ---
@@ -263,82 +266,88 @@ function processAttendanceLogV2() {
         }
 
       } else if (/pastoral check-?in/i.test(eventName)) {
-  // --- CASE 2: Pastoral Check-In ---
-  if (!pastoralData) continue;
+        // --- CASE 2: Pastoral Check-In ---
+        if (!pastoralData) continue;
 
-  let row = pastoralData.nameMap.get(name);
+        let row = pastoralData.nameMap.get(name);
 
-  if (row) {
-    const recentCell = pastoralSheet.getRange(row, pastoralRecentDateCol); // E
-    const prevCell = pastoralSheet.getRange(row, pastoralPreviousDateCol); // F
-    const existingRecent = recentCell.getValue();
+        if (row) {
+          const recentCell = pastoralSheet.getRange(row, pastoralRecentDateCol); // E
+          const prevCell = pastoralSheet.getRange(row, pastoralPreviousDateCol); // F
+          const existingRecent = recentCell.getValue();
 
-    // shift recent → previous
-    if (existingRecent) {
-      prevCell.setValue(existingRecent);
-      prevCell.setHorizontalAlignment("center");   // center align
-      prevCell.setVerticalAlignment("middle");
-    }
+          // shift recent → previous
+          if (existingRecent) {
+            prevCell.setValue(existingRecent);
+            prevCell.setHorizontalAlignment("center");   // center align
+            prevCell.setVerticalAlignment("middle");
+          }
 
-    // write new recent check-in
-    recentCell.setValue(eventDate);
-    recentCell.setHorizontalAlignment("center");   // center align
-    recentCell.setVerticalAlignment("middle");
+          // write new recent check-in
+          recentCell.setValue(eventDate);
+          recentCell.setHorizontalAlignment("center");   // center align
+          recentCell.setVerticalAlignment("middle");
 
-    // write notes
-    if (notes) {
-      const notesCell = pastoralSheet.getRange(row, pastoralNotesCol); // G
-      notesCell.setValue(notes);
-      notesCell.setHorizontalAlignment("left");    // left align
-      notesCell.setVerticalAlignment("middle");
-    }
+          // write notes (always replace, even if blank)
+          const notesCell = pastoralSheet.getRange(row, pastoralNotesCol); // G
+          notesCell.setValue(notes);
+          notesCell.setHorizontalAlignment("left");    // left align
+          notesCell.setVerticalAlignment("middle");
 
-    logData[logDataIndex][logStatusColIndex] = 'Logged';
-    logData[logDataIndex][logRemarksColIndex] = '';
-    recordsWereLogged = true;
-    processedLogs.add(logKey);
+          // write extra from Col L into Col H (pastor, always replace)
+          const extraCell = pastoralSheet.getRange(row, pastoralExtraCol); // H
+          extraCell.setValue(extra);
+          extraCell.setHorizontalAlignment("left");    // LEFT ALIGN
 
-  } else {
-    // --- New Person ---
-    const guestLogEntry = logData[logDataIndex];
-    const lastName = guestLogEntry[logLastNameIndex];
-    const firstName = guestLogEntry[logFirstNameIndex];
+          logData[logDataIndex][logStatusColIndex] = 'Logged';
+          logData[logDataIndex][logRemarksColIndex] = '';
+          recordsWereLogged = true;
+          processedLogs.add(logKey);
 
-    const capitalizedLastName = capitalizeName(lastName);
-    const capitalizedFirstName = capitalizeName(firstName);
+        } else {
+          // --- New Person ---
+          const guestLogEntry = logData[logDataIndex];
+          const lastName = guestLogEntry[logLastNameIndex];
+          const firstName = guestLogEntry[logFirstNameIndex];
 
-    const nextRow = pastoralData.nextBlankRow;
+          const capitalizedLastName = capitalizeName(lastName);
+          const capitalizedFirstName = capitalizeName(firstName);
 
-    pastoralSheet.getRange(nextRow, 3).setValue(capitalizedLastName);  // C
-    pastoralSheet.getRange(nextRow, 4).setValue(capitalizedFirstName); // D
+          const nextRow = pastoralData.nextBlankRow;
 
-    // Insert recent date in E
-    const recentCell = pastoralSheet.getRange(nextRow, pastoralRecentDateCol);
-    recentCell.setValue(eventDate);
-    recentCell.setHorizontalAlignment("center");
-    recentCell.setVerticalAlignment("middle");
+          pastoralSheet.getRange(nextRow, 3).setValue(capitalizedLastName);  // C
+          pastoralSheet.getRange(nextRow, 4).setValue(capitalizedFirstName); // D
 
-    // Insert notes in G
-    if (notes) {
-      const notesCell = pastoralSheet.getRange(nextRow, pastoralNotesCol);
-      notesCell.setValue(notes);
-      notesCell.setHorizontalAlignment("left");
-      notesCell.setVerticalAlignment("middle");
-    }
+          // Insert recent date in E
+          const recentCell = pastoralSheet.getRange(nextRow, pastoralRecentDateCol);
+          recentCell.setValue(eventDate);
+          recentCell.setHorizontalAlignment("center");
+          recentCell.setVerticalAlignment("middle");
 
-    SpreadsheetApp.flush();
+          // Insert notes in G (always set, even if blank)
+          const notesCell = pastoralSheet.getRange(nextRow, pastoralNotesCol);
+          notesCell.setValue(notes);
+          notesCell.setHorizontalAlignment("left");
+          notesCell.setVerticalAlignment("middle");
 
-    pastoralData.nameMap.set(name, nextRow);
-    pastoralData.nextBlankRow++;
-    pastoralData.numRows++;
+          // Insert extra in H (pastor, always set)
+          const extraCell = pastoralSheet.getRange(nextRow, pastoralExtraCol);
+          extraCell.setValue(extra);
+          extraCell.setHorizontalAlignment("left");    // LEFT ALIGN
 
-    logData[logDataIndex][logStatusColIndex] = 'Logged';
-    logData[logDataIndex][logRemarksColIndex] = 'New person added to directory.';
-    recordsWereLogged = true;
-    processedLogs.add(logKey);
-  }
+          SpreadsheetApp.flush();
 
-} else {
+          pastoralData.nameMap.set(name, nextRow);
+          pastoralData.nextBlankRow++;
+          pastoralData.numRows++;
+
+          logData[logDataIndex][logStatusColIndex] = 'Logged';
+          logData[logDataIndex][logRemarksColIndex] = 'New person added to directory.';
+          recordsWereLogged = true;
+          processedLogs.add(logKey);
+        }
+
+      } else {
 
         // --- CASE 3: Other Events (to 'Event Attendance' sheet) ---
         if (!eventSheetData) continue;
