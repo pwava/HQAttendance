@@ -214,6 +214,9 @@ function syncDirectoryNamesToAllTabs() {
       Logger.log("Sheet '" + sheet.getName() + "': no new names needed.");
     }
   });
+
+  // --- After syncing, sort the 6 tabs by Attendance Stats status + name ---
+  sortSyncedTabsByAttendanceStatus();
 }
 
 /**
@@ -294,4 +297,183 @@ function normalizeSheetName_(name) {
     .replace(/\s+/g, ' ')  // collapse any weird whitespace
     .trim()
     .toLowerCase();
+}
+
+/**
+ * Returns a numeric rank for a given status string.
+ * Lower number = higher priority in sorting.
+ *
+ * 0 = core
+ * 1 = active
+ * 2 = inactive
+ * 3 = archived
+ * 4 = not found / other
+ */
+function getStatusRank_(rawStatus) {
+  const s = String(rawStatus || '').toLowerCase().trim();
+  if (s === 'core') return 0;
+  if (s === 'active') return 1;
+  if (s === 'inactive') return 2;
+  if (s === 'archived') return 3;
+  return 4; // not found or other
+}
+
+/**
+ * Sorts the following tabs by status from 'Attendance Stats' and then by name:
+ * - Event Attendance
+ * - Sunday Service
+ * - Appsheet Sunserv
+ * - Appsheet Event
+ * - Appsheet Pastoral
+ * - Pastoral Check-In
+ *
+ * 'Attendance Stats' sheet:
+ *   - Col C: Last Name
+ *   - Col D: First Name
+ *   - Col F: Status (core, active, inactive, archived)
+ *   - Rows 1–2 headers, data from row 3
+ *
+ * Sorting order:
+ *   1) core (top, A–Z by last, first)
+ *   2) active (A–Z by last, first)
+ *   3) inactive (A–Z by last, first)
+ *   4) archived or not found in Attendance Stats (A–Z by last, first)
+ */
+function sortSyncedTabsByAttendanceStatus() {
+  const ATTENDANCE_STATS_SHEET_NAME = 'Attendance Stats';
+  const ATT_LAST_NAME_COL = 3; // C
+  const ATT_FIRST_NAME_COL = 4; // D
+  const ATT_STATUS_COL = 6; // F
+  const ATT_HEADER_ROWS = 2; // rows 1–2
+
+  const SORT_SHEETS_CONFIG = [
+    {
+      name: 'Event Attendance',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 4
+    },
+    {
+      name: 'Sunday Service',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3
+    },
+    {
+      name: 'Appsheet Sunserv',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1
+    },
+    {
+      name: 'Appsheet Event',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1
+    },
+    {
+      name: 'Appsheet Pastoral',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1
+    },
+    {
+      name: 'Pastoral Check-In',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3
+    }
+  ];
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const attSheet = ss.getSheetByName(ATTENDANCE_STATS_SHEET_NAME);
+  if (!attSheet) {
+    throw new Error("Attendance Stats sheet '" + ATTENDANCE_STATS_SHEET_NAME + "' not found.");
+  }
+
+  const lastRowStats = attSheet.getLastRow();
+  if (lastRowStats <= ATT_HEADER_ROWS) {
+    Logger.log('Attendance Stats has no data rows to use for sorting.');
+    return;
+  }
+
+  const statsNumRows = lastRowStats - ATT_HEADER_ROWS;
+
+  const statsLastNames = attSheet
+    .getRange(ATT_HEADER_ROWS + 1, ATT_LAST_NAME_COL, statsNumRows, 1)
+    .getValues();
+  const statsFirstNames = attSheet
+    .getRange(ATT_HEADER_ROWS + 1, ATT_FIRST_NAME_COL, statsNumRows, 1)
+    .getValues();
+  const statsStatuses = attSheet
+    .getRange(ATT_HEADER_ROWS + 1, ATT_STATUS_COL, statsNumRows, 1)
+    .getValues();
+
+  // Build map: key (Last|First normalized) -> statusRank
+  const statusMap = {};
+  for (let i = 0; i < statsNumRows; i++) {
+    const ln = (statsLastNames[i][0] || '').toString().trim();
+    const fn = (statsFirstNames[i][0] || '').toString().trim();
+    const status = statsStatuses[i][0];
+
+    const key = buildNameKey_(ln, fn);
+    if (!key) continue;
+
+    statusMap[key] = getStatusRank_(status);
+  }
+
+  // Sort each of the target sheets
+  SORT_SHEETS_CONFIG.forEach(function (cfg) {
+    const sheet = getSheetByNameLoose_(ss, cfg.name);
+    if (!sheet) {
+      Logger.log("Sheet '" + cfg.name + "' not found. Skipping sort.");
+      return;
+    }
+
+    const lastRow = sheet.getLastRow();
+    const headerRows = cfg.headerRows;
+    if (lastRow <= headerRows) {
+      Logger.log("Sheet '" + cfg.name + "' has no data rows to sort.");
+      return;
+    }
+
+    const numRows = lastRow - headerRows;
+    const numCols = sheet.getLastColumn();
+
+    const dataRange = sheet.getRange(headerRows + 1, 1, numRows, numCols);
+    const dataValues = dataRange.getValues();
+
+    const rowsWithMeta = dataValues.map(function (row, index) {
+      const lnRaw = (row[cfg.lastNameCol - 1] || '').toString().trim();
+      const fnRaw = (row[cfg.firstNameCol - 1] || '').toString().trim();
+      const key = buildNameKey_(lnRaw, fnRaw);
+
+      let rank = 4; // default: not found / other
+      if (key && Object.prototype.hasOwnProperty.call(statusMap, key)) {
+        rank = statusMap[key];
+      }
+
+      return {
+        row: row,
+        rank: rank,
+        ln: lnRaw.toLowerCase(),
+        fn: fnRaw.toLowerCase(),
+        originalIndex: index
+      };
+    });
+
+    rowsWithMeta.sort(function (a, b) {
+      if (a.rank !== b.rank) return a.rank - b.rank;
+      if (a.ln !== b.ln) return a.ln.localeCompare(b.ln);
+      if (a.fn !== b.fn) return a.fn.localeCompare(b.fn);
+      return a.originalIndex - b.originalIndex;
+    });
+
+    const sortedValues = rowsWithMeta.map(function (item) {
+      return item.row;
+    });
+
+    dataRange.setValues(sortedValues);
+    Logger.log("Sheet '" + cfg.name + "' sorted by status and name.");
+  });
 }
