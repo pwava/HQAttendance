@@ -356,26 +356,66 @@ function processAttendanceLogV2() {
         let col = eventSheetData.dateMap.get(eventKey);
 
         if (!col) {
-          col = eventSheetData.lastDataCol + 1;
-          
+          // === NEW LOGIC FOR FINDING AVAILABLE EVENT COLUMN ===
+          // 1) Try to find the first column where:
+          //    - Row 3 has "Post event name here"
+          //    - Row 2 is blank (no date)
+          const lastCol = eventSheet.getLastColumn();
+          let placeholderCol = null;
+
+          if (lastCol >= eventDataStartCol) {
+            const width = lastCol - eventDataStartCol + 1;
+            const nameRowValues = eventSheet
+              .getRange(eventNameRow, eventDataStartCol, 1, width)
+              .getValues()[0];
+            const dateRowValues = eventSheet
+              .getRange(eventDateRow, eventDataStartCol, 1, width)
+              .getValues()[0];
+
+            for (let i = 0; i < width; i++) {
+              const nameCell = nameRowValues[i];
+              const dateCell = dateRowValues[i];
+              if (nameCell === 'Post event name here' && !dateCell) {
+                placeholderCol = eventDataStartCol + i;
+                break;
+              }
+            }
+          }
+
+          if (placeholderCol !== null) {
+            // Use the available placeholder column
+            col = placeholderCol;
+          } else {
+            // No more "Post event name here" with blank date → fallback to append new column
+            col = eventSheetData.lastDataCol + 1;
+          }
+
+          // Now write the date, event name, and count formula into the chosen column
           eventSheet.getRange(eventDateRow, col).setValue(eventDate);
           eventSheet.getRange(eventNameRow, col).setValue(eventName);
-          
+
           const colLetter = eventSheet.getRange(1, col).getA1Notation().replace(/\d+/g, '');
           const formula = `=COUNTIF(${colLetter}${eventDataStartRow}:${colLetter}, TRUE)`;
           eventSheet.getRange(eventCountRow, col).setFormula(formula);
 
           if (eventSheetData.numRows > 0) {
             const newCheckboxRange = eventSheet.getRange(eventDataStartRow, col, eventSheetData.numRows, 1);
-            newCheckboxRange.insertCheckboxes();  
+            newCheckboxRange.insertCheckboxes();
           }
-          
+
           SpreadsheetApp.flush();
 
           eventSheetData.dateMap.set(eventKey, col);
-          eventSheetData.lastDataCol = col;
-          eventSheetData.checkboxes.forEach(r => r.push(false));
-          Logger.log(`Added new column ${col} for ${eventName} on ${formattedFullDate} to sheet "${eventSheetName}".`);
+
+          // Only extend the in-memory checkbox array if we actually added a NEW column
+          if (placeholderCol === null) {
+            eventSheetData.lastDataCol = col;
+            eventSheetData.checkboxes.forEach(r => r.push(false));
+          } else if (col > eventSheetData.lastDataCol) {
+            eventSheetData.lastDataCol = col;
+          }
+
+          Logger.log(`Added/used column ${col} for ${eventName} on ${formattedFullDate} in sheet "${eventSheetName}".`);
         }
 
         let row = eventSheetData.nameMap.get(name);
