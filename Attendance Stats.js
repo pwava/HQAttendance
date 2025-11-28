@@ -174,39 +174,38 @@ function matchOrAssignBelCodes() {
   }
 
   // --- PASTORAL CHECK-IN FROM ATTENDANCE LOG (DEDUPLICATED PER DATE) ---
-if (lData && lData.length > 1) {
+  if (lData && lData.length > 1) {
 
-  // Keep map of "BEL|DATE" to prevent duplicates
-  const pastoralSeen = new Set();
+    // Keep map of "BEL|DATE" to prevent duplicates
+    const pastoralSeen = new Set();
 
-  lData.slice(1).forEach(row => {
-    const event = row[5];
-    if (!event) return;
+    lData.slice(1).forEach(row => {
+      const event = row[5];
+      if (!event) return;
 
-    if (String(event).toLowerCase().trim() !== "pastoral check-in") return;
+      if (String(event).toLowerCase().trim() !== "pastoral check-in") return;
 
-    const last = row[2];
-    const first = row[3];
-    const key = normalizeName(`${last}, ${first}`);
-    if (!key) return;
+      const last = row[2];
+      const first = row[3];
+      const key = normalizeName(`${last}, ${first}`);
+      if (!key) return;
 
-    let bel = belMap.get(key) || generateBEL();
-    belMap.set(key, bel);
+      let bel = belMap.get(key) || generateBEL();
+      belMap.set(key, bel);
 
-    const date = row[6];
-    if (!date) return;
+      const date = row[6];
+      if (!date) return;
 
-    // Create unique key per date
-    const dedupeKey = `${bel}|${new Date(date).toDateString()}`;
-    if (pastoralSeen.has(dedupeKey)) return;   // skip duplicates
+      // Create unique key per date
+      const dedupeKey = `${bel}|${new Date(date).toDateString()}`;
+      if (pastoralSeen.has(dedupeKey)) return;   // skip duplicates
 
-    pastoralSeen.add(dedupeKey);
+      pastoralSeen.add(dedupeKey);
 
-    // Add only once
-    results.push([bel, first, last, "Pastoral Check-In", "Pastoral Check-In", date, false]);
-  });
-}
-
+      // Add only once
+      results.push([bel, first, last, "Pastoral Check-In", "Pastoral Check-In", date, false]);
+    });
+  }
 
   return { rawData: results, dData };
 }
@@ -400,13 +399,25 @@ function performFinalSort() {
   data.sort((a, b) => {
     const guestA = a[4] === "Guest";
     const guestB = b[4] === "Guest";
-    if (guestA !== guestB) return guestA ? -1 : 1;
+    if (guestA !== guestB) return guestA ? -1 : 1; // Guests on top
 
     const aLvl = order[a[5]] || 99;
     const bLvl = order[b[5]] || 99;
-    if (aLvl !== bLvl) return aLvl - bLvl;
+    if (aLvl !== bLvl) return aLvl - bLvl; // Core, Active, Inactive, Archive
 
-    return (b[10] || 0) - (a[10] || 0);
+    // Then sort alphabetically by Last Name (Column C, index 2)
+    const lastA = (a[2] || "").toString().toLowerCase();
+    const lastB = (b[2] || "").toString().toLowerCase();
+    if (lastA < lastB) return -1;
+    if (lastA > lastB) return 1;
+
+    // Optional tie-breaker by First Name (Column D, index 3)
+    const firstA = (a[3] || "").toString().toLowerCase();
+    const firstB = (b[3] || "").toString().toLowerCase();
+    if (firstA < firstB) return -1;
+    if (firstA > firstB) return 1;
+
+    return 0;
   });
 
   range.setValues(data);
