@@ -23,6 +23,18 @@
  *   - Appsheet Pastoral: Col B last name, Col C first name, row 1 header
  *                      + when appending, put sequential ID in Col A
  *   - Pastoral Check-In: Col C last name, Col D first name, rows 1–3 headers
+ *
+ * EXTRA:
+ * - Also scans Event Attendance, Sunday Service, Pastoral Check-In,
+ *   Appsheet Sunserv, Appsheet Event, Appsheet Pastoral
+ *   and ensures all unique names (Directory + those 6) exist in:
+ *   - Event Attendance
+ *   - Sunday Service
+ *   - Pastoral Check-In
+ *   - Appsheet Sunserv
+ *   - Appsheet Event
+ *   - Appsheet Pastoral
+ *   (no duplicates in each tab)
  */
 function syncDirectoryNamesToAllTabs() {
   const CONFIG_SHEET_NAME = 'Config';
@@ -98,16 +110,20 @@ function syncDirectoryNamesToAllTabs() {
   const lastDirRow = directorySheet.getLastRow();
   if (lastDirRow <= DIRECTORY_HEADER_ROWS) {
     Logger.log('No data rows found in Directory.');
-    return;
+    // We still continue later, because we may sync names from other tabs
   }
 
-  const dirNumRows = lastDirRow - DIRECTORY_HEADER_ROWS;
-  const dirLastNames = directorySheet
-    .getRange(DIRECTORY_HEADER_ROWS + 1, DIRECTORY_LAST_NAME_COL, dirNumRows, 1)
-    .getValues();
-  const dirFirstNames = directorySheet
-    .getRange(DIRECTORY_HEADER_ROWS + 1, DIRECTORY_FIRST_NAME_COL, dirNumRows, 1)
-    .getValues();
+  const dirNumRows = Math.max(0, lastDirRow - DIRECTORY_HEADER_ROWS);
+  let dirLastNames = [];
+  let dirFirstNames = [];
+  if (dirNumRows > 0) {
+    dirLastNames = directorySheet
+      .getRange(DIRECTORY_HEADER_ROWS + 1, DIRECTORY_LAST_NAME_COL, dirNumRows, 1)
+      .getValues();
+    dirFirstNames = directorySheet
+      .getRange(DIRECTORY_HEADER_ROWS + 1, DIRECTORY_FIRST_NAME_COL, dirNumRows, 1)
+      .getValues();
+  }
 
   // Build a clean list of directory names and keys
   const directoryEntries = [];
@@ -128,10 +144,10 @@ function syncDirectoryNamesToAllTabs() {
 
   if (directoryEntries.length === 0) {
     Logger.log('Directory has no valid (Last, First) name rows.');
-    return;
+    // Do not return; we still want to sync names from other tabs
   }
 
-  // --- For each sheet, append any missing names from Directory ---
+  // --- For each sheet, append any missing names from Directory (one-way) ---
   SHEETS_CONFIG.forEach(function (cfg) {
     const sheet = getSheetByNameLoose_(ss, cfg.name);
     if (!sheet) {
@@ -211,9 +227,18 @@ function syncDirectoryNamesToAllTabs() {
 
       Logger.log("Sheet '" + sheet.getName() + "': appended " + rowsToAppend.length + " names from Directory.");
     } else {
-      Logger.log("Sheet '" + sheet.getName() + "': no new names needed.");
+      Logger.log("Sheet '" + sheet.getName() + "': no new names needed from Directory.");
     }
   });
+
+  // --- Build union of names (Directory + ALL 6 tabs) ---
+  const unionEntries = buildUnionEntries_(ss, directoryEntries);
+
+  // --- Ensure all union names are present in Event Attendance / Sunday Service / Pastoral Check-In ---
+  syncUnionNamesIntoAttendanceTabs_(ss, unionEntries);
+
+  // --- Ensure all union names are present in Appsheet tabs (no duplicates) ---
+  syncUnionNamesIntoAppsheetTabs_(ss, unionEntries);
 
   // --- After syncing, sort the 6 tabs by Attendance Stats status + name ---
   sortSyncedTabsByAttendanceStatus();
@@ -475,5 +500,502 @@ function sortSyncedTabsByAttendanceStatus() {
 
     dataRange.setValues(sortedValues);
     Logger.log("Sheet '" + cfg.name + "' sorted by status and name.");
+  });
+}
+
+/**
+ * Build a union of names from:
+ * - Directory (directoryEntries)
+ * - Event Attendance
+ * - Sunday Service
+ * - Pastoral Check-In
+ *
+ * NOTE (Option 1):
+ * Appsheet tabs are NOT used as a source here.
+ * They only receive the union (targets), so
+ * names that exist only in Appsheet are not
+ * pushed into the other 3 attendance tabs.
+ */
+function buildUnionEntries_(ss, directoryEntries) {
+  const EXTRA_SOURCE_SHEETS = [
+    {
+      name: 'Event Attendance',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 4
+    },
+    {
+      name: 'Sunday Service',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3
+    },
+    {
+      name: 'Pastoral Check-In',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3
+    }
+  ];
+
+  const unionMap = new Map();
+
+  // Start with Directory entries
+  directoryEntries.forEach(function (entry) {
+    if (!unionMap.has(entry.key)) {
+      unionMap.set(entry.key, {
+        lastName: entry.lastName,
+        firstName: entry.firstName,
+        key: entry.key
+      });
+    }
+  });
+
+  // Add names from extra source sheets (attendance tabs only)
+  EXTRA_SOURCE_SHEETS.forEach(function (cfg) {
+    const sheet = getSheetByNameLoose_(ss, cfg.name);
+    if (!sheet) {
+      Logger.log("Extra source sheet '" + cfg.name + "' not found. Skipping.");
+      return;
+    }
+
+    const lastRow = sheet.getLastRow();
+    const dataStartRow = cfg.headerRows + 1;
+    if (lastRow < dataStartRow) {
+      Logger.log("Extra source sheet '" + cfg.name + "' has no data rows.");
+      return;
+    }
+
+    const numRows = lastRow - cfg.headerRows;
+    const lastNames = sheet
+      .getRange(dataStartRow, cfg.lastNameCol, numRows, 1)
+      .getValues();
+    const firstNames = sheet
+      .getRange(dataStartRow, cfg.firstNameCol, numRows, 1)
+      .getValues();
+
+    for (let i = 0; i < numRows; i++) {
+      const ln = (lastNames[i][0] || '').toString().trim();
+      const fn = (firstNames[i][0] || '').toString().trim();
+      if (!ln && !fn) continue;
+
+      const key = buildNameKey_(ln, fn);
+      if (!key) continue;
+
+      if (!unionMap.has(key)) {
+        unionMap.set(key, {
+          lastName: ln,
+          firstName: fn,
+          key: key
+        });
+      }
+    }
+  });
+
+  return Array.from(unionMap.values());
+}
+
+
+/**
+ * Ensure all union names exist in:
+ * - Event Attendance
+ * - Sunday Service
+ * - Pastoral Check-In
+ * (no duplicates in each tab)
+ */
+function syncUnionNamesIntoAttendanceTabs_(ss, unionEntries) {
+  const ATTENDANCE_TABS_CONFIG = [
+    {
+      name: 'Event Attendance',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 4
+    },
+    {
+      name: 'Sunday Service',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3
+    },
+    {
+      name: 'Pastoral Check-In',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3
+    }
+  ];
+
+  ATTENDANCE_TABS_CONFIG.forEach(function (cfg) {
+    const sheet = getSheetByNameLoose_(ss, cfg.name);
+    if (!sheet) {
+      Logger.log("Attendance tab '" + cfg.name + "' not found. Skipping union sync.");
+      return;
+    }
+
+    const lastRow = sheet.getLastRow();
+    const dataStartRow = cfg.headerRows + 1;
+    const numCols = sheet.getLastColumn();
+    const existingKeys = new Set();
+
+    if (lastRow >= dataStartRow) {
+      const numRows = lastRow - cfg.headerRows;
+      const lastNameValues = sheet
+        .getRange(dataStartRow, cfg.lastNameCol, numRows, 1)
+        .getValues();
+      const firstNameValues = sheet
+        .getRange(dataStartRow, cfg.firstNameCol, numRows, 1)
+        .getValues();
+
+      for (let r = 0; r < numRows; r++) {
+        const ln = (lastNameValues[r][0] || '').toString().trim();
+        const fn = (firstNameValues[r][0] || '').toString().trim();
+        if (!ln && !fn) continue;
+
+        const key = buildNameKey_(ln, fn);
+        if (key) existingKeys.add(key);
+      }
+    }
+
+    const rowsToAppend = [];
+    unionEntries.forEach(function (entry) {
+      if (!existingKeys.has(entry.key)) {
+        existingKeys.add(entry.key);
+
+        const newRow = new Array(numCols).fill('');
+        newRow[cfg.lastNameCol - 1] = entry.lastName;
+        newRow[cfg.firstNameCol - 1] = entry.firstName;
+
+        rowsToAppend.push(newRow);
+      }
+    });
+
+    if (rowsToAppend.length > 0) {
+      const appendStartRow = getNextAvailableRow_(sheet, dataStartRow, cfg.lastNameCol, cfg.firstNameCol);
+      sheet.getRange(appendStartRow, 1, rowsToAppend.length, numCols)
+        .setValues(rowsToAppend);
+
+      Logger.log("Attendance tab '" + sheet.getName() + "': appended " + rowsToAppend.length + " union names.");
+    } else {
+      Logger.log("Attendance tab '" + cfg.name + "': no union names needed.");
+    }
+  });
+}
+
+/**
+ * Take the union of names and make sure ALL of them exist
+ * in the 3 Appsheet tabs (no duplicates per tab):
+ * - Appsheet Sunserv
+ * - Appsheet Event
+ * - Appsheet Pastoral
+ */
+function syncUnionNamesIntoAppsheetTabs_(ss, unionEntries) {
+  const APPSHEET_TABS_CONFIG = [
+    {
+      name: 'Appsheet Sunserv',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1,
+      idCol: 1          // A
+    },
+    {
+      name: 'Appsheet Event',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1,
+      idCol: 1          // A
+    },
+    {
+      name: 'Appsheet Pastoral',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1,
+      idCol: 1          // A
+    }
+  ];
+
+  APPSHEET_TABS_CONFIG.forEach(function (cfg) {
+    const sheet = getSheetByNameLoose_(ss, cfg.name);
+    if (!sheet) {
+      Logger.log("Appsheet tab '" + cfg.name + "' not found. Skipping union sync.");
+      return;
+    }
+
+    const lastRow = sheet.getLastRow();
+    const dataStartRow = cfg.headerRows + 1;
+    const numCols = sheet.getLastColumn();
+    const existingKeys = new Set();
+
+    if (lastRow >= dataStartRow) {
+      const numRows = lastRow - cfg.headerRows;
+      const lastNameValues = sheet
+        .getRange(dataStartRow, cfg.lastNameCol, numRows, 1)
+        .getValues();
+      const firstNameValues = sheet
+        .getRange(dataStartRow, cfg.firstNameCol, numRows, 1)
+        .getValues();
+
+      for (let r = 0; r < numRows; r++) {
+        const ln = (lastNameValues[r][0] || '').toString().trim();
+        const fn = (firstNameValues[r][0] || '').toString().trim();
+        if (!ln && !fn) continue;
+
+        const key = buildNameKey_(ln, fn);
+        if (key) existingKeys.add(key);
+      }
+    }
+
+    // Determine next ID for Appsheet tabs
+    let nextId = null;
+    if (cfg.idCol) {
+      let maxId = 0;
+      if (lastRow >= dataStartRow) {
+        const idNumRows = lastRow - cfg.headerRows;
+        const idValues = sheet
+          .getRange(dataStartRow, cfg.idCol, idNumRows, 1)
+          .getValues();
+
+        for (let r = 0; r < idNumRows; r++) {
+          const raw = idValues[r][0];
+          if (raw === '' || raw === null) continue;
+          const n = Number(raw);
+          if (!isNaN(n) && n > maxId) maxId = n;
+        }
+      }
+      nextId = maxId;
+    }
+
+    const rowsToAppend = [];
+    unionEntries.forEach(function (entry) {
+      if (!existingKeys.has(entry.key)) {
+        existingKeys.add(entry.key);
+
+        const newRow = new Array(numCols).fill('');
+
+        if (cfg.idCol && nextId !== null) {
+          nextId += 1;
+          newRow[cfg.idCol - 1] = nextId;
+        }
+
+        newRow[cfg.lastNameCol - 1] = entry.lastName;
+        newRow[cfg.firstNameCol - 1] = entry.firstName;
+
+        rowsToAppend.push(newRow);
+      }
+    });
+
+    if (rowsToAppend.length > 0) {
+      const appendStartRow = getNextAvailableRow_(sheet, dataStartRow, cfg.lastNameCol, cfg.firstNameCol);
+      sheet.getRange(appendStartRow, 1, rowsToAppend.length, numCols)
+        .setValues(rowsToAppend);
+
+      Logger.log("Appsheet tab '" + sheet.getName() + "': appended " + rowsToAppend.length + " union names.");
+    } else {
+      Logger.log("Appsheet tab '" + cfg.name + "': no union names needed.");
+    }
+  });
+}
+/**
+ * Debug helper:
+ * - Counts how many unique names each tab has.
+ * - Shows how many names in Appsheet tabs are NOT in Directory.
+ *
+ * Usage:
+ * - Run checkNameCountsAndExtras() from the Script Editor.
+ * - Open View > Logs to see the summary.
+ */
+function checkNameCountsAndExtras() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const CONFIG_SHEET_NAME = 'Config';
+  const DIRECTORY_SHEET_NAME = 'Directory';
+
+  // Tab configuration for reading names
+  const tabConfigs = [
+    {
+      id: 'directory',
+      label: 'Directory',
+      sheetName: DIRECTORY_SHEET_NAME,
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3,
+      external: true    // in external spreadsheet
+    },
+    {
+      id: 'event',
+      label: 'Event Attendance',
+      sheetName: 'Event Attendance',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 4
+    },
+    {
+      id: 'sunday',
+      label: 'Sunday Service',
+      sheetName: 'Sunday Service',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3
+    },
+    {
+      id: 'pastoralCheck',
+      label: 'Pastoral Check-In',
+      sheetName: 'Pastoral Check-In',
+      lastNameCol: 3,   // C
+      firstNameCol: 4,  // D
+      headerRows: 3
+    },
+    {
+      id: 'appSunserv',
+      label: 'Appsheet Sunserv',
+      sheetName: 'Appsheet Sunserv',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1
+    },
+    {
+      id: 'appEvent',
+      label: 'Appsheet Event',
+      sheetName: 'Appsheet Event',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1
+    },
+    {
+      id: 'appPastoral',
+      label: 'Appsheet Pastoral',
+      sheetName: 'Appsheet Pastoral',
+      lastNameCol: 2,   // B
+      firstNameCol: 3,  // C
+      headerRows: 1
+    }
+  ];
+
+  // --- Open external Directory spreadsheet (same logic as main sync) ---
+  let externalSs = null;
+  const configSheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+  if (configSheet) {
+    const externalRef = configSheet.getRange('B2').getValue();
+    if (externalRef) {
+      const externalId = extractSpreadsheetIdFromString_(String(externalRef));
+      externalSs = SpreadsheetApp.openById(externalId);
+    } else {
+      Logger.log("checkNameCountsAndExtras: Config!B2 is empty, cannot read external Directory.");
+    }
+  } else {
+    Logger.log("checkNameCountsAndExtras: Config sheet not found.");
+  }
+
+  // Store results per tab
+  const results = {};
+
+  tabConfigs.forEach(function (cfg) {
+    let sheet = null;
+
+    if (cfg.external) {
+      if (!externalSs) {
+        Logger.log("checkNameCountsAndExtras: External Directory spreadsheet not available.");
+        return;
+      }
+      sheet = externalSs.getSheetByName(cfg.sheetName);
+    } else {
+      sheet = getSheetByNameLoose_(ss, cfg.sheetName);
+    }
+
+    if (!sheet) {
+      Logger.log("checkNameCountsAndExtras: Sheet '" + cfg.sheetName + "' not found. Skipping.");
+      return;
+    }
+
+    const lastRow = sheet.getLastRow();
+    const dataStartRow = cfg.headerRows + 1;
+
+    if (lastRow < dataStartRow) {
+      results[cfg.id] = {
+        label: cfg.label,
+        totalRows: 0,
+        nonEmptyRows: 0,
+        uniqueCount: 0,
+        map: new Map()
+      };
+      Logger.log(cfg.label + ": no data rows.");
+      return;
+    }
+
+    const numRows = lastRow - cfg.headerRows;
+    const lastNames = sheet
+      .getRange(dataStartRow, cfg.lastNameCol, numRows, 1)
+      .getValues();
+    const firstNames = sheet
+      .getRange(dataStartRow, cfg.firstNameCol, numRows, 1)
+      .getValues();
+
+    const nameMap = new Map();
+    let nonEmptyRows = 0;
+
+    for (let i = 0; i < numRows; i++) {
+      const ln = (lastNames[i][0] || '').toString().trim();
+      const fn = (firstNames[i][0] || '').toString().trim();
+      if (!ln && !fn) {
+        continue;
+      }
+      nonEmptyRows++;
+
+      const key = buildNameKey_(ln, fn);
+      if (!key) continue;
+
+      if (!nameMap.has(key)) {
+        nameMap.set(key, { lastName: ln, firstName: fn });
+      }
+    }
+
+    results[cfg.id] = {
+      label: cfg.label,
+      totalRows: numRows,        // rows under headers (including blank)
+      nonEmptyRows: nonEmptyRows, // rows that have at least one of last/first
+      uniqueCount: nameMap.size, // unique normalized names
+      map: nameMap
+    };
+
+    Logger.log(
+      cfg.label +
+      ": rows=" + numRows +
+      ", nonEmptyRows=" + nonEmptyRows +
+      ", uniqueNames=" + nameMap.size
+    );
+  });
+
+  // --- Compare Appsheet tabs vs Directory (to explain "2x bigger") ---
+  const dirRes = results['directory'];
+  if (!dirRes) {
+    Logger.log("checkNameCountsAndExtras: Directory results not available, cannot compare extras.");
+    return;
+  }
+
+  const dirMap = dirRes.map;
+  const appsheetIds = ['appSunserv', 'appEvent', 'appPastoral'];
+
+  appsheetIds.forEach(function (id) {
+    const res = results[id];
+    if (!res) return;
+
+    const extras = [];
+    res.map.forEach(function (value, key) {
+      if (!dirMap.has(key)) {
+        extras.push(value.lastName + ', ' + value.firstName);
+      }
+    });
+
+    Logger.log(res.label + ": names NOT in Directory = " + extras.length);
+
+    // Show a preview (first 30) to help debugging without flooding the log
+    if (extras.length > 0) {
+      const previewCount = Math.min(30, extras.length);
+      const preview = extras.slice(0, previewCount).join(" | ");
+      Logger.log(
+        res.label +
+        " (first " + previewCount + " extras not in Directory): " +
+        preview
+      );
+    }
   });
 }
