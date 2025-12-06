@@ -196,14 +196,26 @@ function updateDirectoryActivityLevel() {
 
 
     // --- 5b. Mark non-matched Directory entries as "Archived" ---
-    directoryActivityData.forEach((row, index) => {
-      if (!matchedDirectoryIndices.has(index)) {
-        // This person is in the Directory but not in Attendance Stats.
-        if (row[0] !== "Archived") { // Only update if it's not already "Archived"
-          row[0] = "Archived";
-        }
-      }
-    });
+// (Skip rows where BOTH Column C and D are blank — instead set Column J to blank)
+directoryActivityData.forEach((row, index) => {
+  const dirNameRow = directoryNamesData[index];
+  const dirLast = dirNameRow[0];
+  const dirFirst = dirNameRow[1];
+
+  // If BOTH C and D are blank → clear activity level and skip
+  if (!dirLast && !dirFirst) {
+    row[0] = ""; // make activity level BLANK
+    return;
+  }
+
+  // If name exists but was not matched → mark as Archived
+  if (!matchedDirectoryIndices.has(index)) {
+    if (row[0] !== "Archived") {
+      row[0] = "Archived";
+    }
+  }
+});
+
 
 
     // --- 6. Write back updates to the Directory sheet ---
