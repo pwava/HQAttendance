@@ -706,3 +706,224 @@ function capitalizeName(nameStr) {
       return match;
     });
 }
+
+/**
+ * Reverse of processAttendanceLogV2:
+ * Reads checkboxes from "Sunday Service" and "Event Attendance"
+ * and writes attendance rows into "Attendance Log".
+ *
+ * - Sunday Service:
+ *   - Data starts at row 4.
+ *   - Last name in Col C, first name in Col D.
+ *   - Dates are in row 2 (starting at Col I / index 9).
+ *   - If checkbox is TRUE, log a row:
+ *     - Col A: unique id (e.g. "7a60d5eb").
+ *     - Col B: "FirstName LastName".
+ *     - Col C: Last Name.
+ *     - Col D: First Name.
+ *     - Col F: "Sunday Service".
+ *     - Col G: Date from row 2.
+ *     - Col H: Timestamp (now).
+ *     - Col I: "Logged".
+ *
+ * - Event Attendance:
+ *   - Data starts at row 5.
+ *   - Last name in Col C, first name in Col D.
+ *   - Dates in row 2, event names in row 3.
+ *   - Only use columns where:
+ *       Row 2 has a date AND
+ *       Row 3 has an event name AND
+ *       Row 3 is NOT "Post event name here".
+ *   - For each TRUE checkbox:
+ *     - Same mapping as above, but Col F = event name (row 3).
+ *
+ * - Prevents duplicate log rows by checking existing
+ *   (LastName, FirstName, EventName, Date) combinations
+ *   already in "Attendance Log".
+ */
+function exportSheetsAttendanceToLogV2() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const logSheet = ss.getSheetByName('Attendance Log');
+  if (!logSheet) {
+    Logger.log('Sheet "Attendance Log" not found.');
+    return;
+  }
+
+  const sunServiceSheet = ss.getSheetByName('Sunday Service');
+  const eventSheet = ss.getSheetByName('Event Attendance');
+
+  const timezone = ss.getSpreadsheetTimeZone() || 'GMT';
+
+  // --- Helper: generate 8-char hex ID like "7a60d5eb" ---
+  function generateUniqueId_() {
+    return Math.random().toString(16).slice(2, 10);
+  }
+
+  // --- Helper: normalize key for dedupe (lname, fname, event, date) ---
+  function makeKey_(lastName, firstName, eventName, dateObjOrStr) {
+    if (!lastName || !firstName || !eventName || !dateObjOrStr) return '';
+    let dateKey;
+    if (dateObjOrStr instanceof Date) {
+      dateKey = Utilities.formatDate(dateObjOrStr, timezone, 'yyyy-MM-dd');
+    } else {
+      const d = new Date(dateObjOrStr);
+      if (!isNaN(d.getTime())) {
+        dateKey = Utilities.formatDate(d, timezone, 'yyyy-MM-dd');
+      } else {
+        dateKey = String(dateObjOrStr);
+      }
+    }
+    return [
+      String(lastName).trim().toLowerCase(),
+      String(firstName).trim().toLowerCase(),
+      String(eventName).trim().toLowerCase(),
+      dateKey
+    ].join('|');
+  }
+
+  // --- Build set of existing log keys so we don't duplicate ---
+  const existingKeys = new Set();
+  const lastLogRow = logSheet.getLastRow();
+  if (lastLogRow > 1) {
+    // Read Col C (Last), D (First), F (Event), G (Date)
+    const existingRange = logSheet.getRange(2, 1, lastLogRow - 1, 7).getValues();
+    // [A,B,C,D,E,F,G]
+    for (let i = 0; i < existingRange.length; i++) {
+      const row = existingRange[i];
+      const lastName = row[2];  // Col C
+      const firstName = row[3]; // Col D
+      const eventName = row[5]; // Col F
+      const dateVal = row[6];   // Col G
+      const key = makeKey_(lastName, firstName, eventName, dateVal);
+      if (key) existingKeys.add(key);
+    }
+  }
+
+  const newRows = [];
+  const newKeys = new Set();
+  const now = new Date();
+
+  // --- Helper: push a new log row if not duplicate ---
+  function maybeAddLogRow_(lastName, firstName, eventName, dateVal) {
+    if (!lastName && !firstName) return;
+    if (!eventName || !dateVal) return;
+
+    let dateObj = dateVal;
+    if (!(dateObj instanceof Date)) {
+      const tmp = new Date(dateVal);
+      if (isNaN(tmp.getTime())) return;
+      dateObj = tmp;
+    }
+
+    const key = makeKey_(lastName, firstName, eventName, dateObj);
+    if (!key) return;
+    if (existingKeys.has(key) || newKeys.has(key)) return;
+
+    newKeys.add(key);
+    existingKeys.add(key);
+
+    const fullName = `${firstName || ''} ${lastName || ''}`.trim();
+    const uniqueId = generateUniqueId_();
+
+    // Col A–I: [ID, FullName, LastName, FirstName, (Type blank), EventName, EventDate, Timestamp, Status]
+    newRows.push([
+      uniqueId,
+      fullName,
+      lastName || '',
+      firstName || '',
+      '',                    // Col E (Type) – left blank
+      eventName,
+      dateObj,
+      new Date(),            // Col H: timestamp (now)
+      'Logged'               // Col I: status
+    ]);
+  }
+
+  // --- 1) From "Sunday Service" ---
+  if (sunServiceSheet) {
+    const sunDataStartRow = 4;   // data row 4
+    const sunDataStartCol = 9;   // column I
+    const lastRow = sunServiceSheet.getLastRow();
+    const lastCol = sunServiceSheet.getLastColumn();
+
+    if (lastRow >= sunDataStartRow && lastCol >= sunDataStartCol) {
+      const numRows = lastRow - sunDataStartRow + 1;
+      const numCols = lastCol - sunDataStartCol + 1;
+
+      const nameValues = sunServiceSheet.getRange(sunDataStartRow, 3, numRows, 2).getValues(); // C–D
+      const checkboxValues = sunServiceSheet.getRange(sunDataStartRow, sunDataStartCol, numRows, numCols).getValues();
+      const dateRowValues = sunServiceSheet.getRange(2, sunDataStartCol, 1, numCols).getValues()[0];
+
+      for (let r = 0; r < numRows; r++) {
+        const lastName = nameValues[r][0];
+        const firstName = nameValues[r][1];
+
+        if (!lastName && !firstName) continue;
+
+        for (let c = 0; c < numCols; c++) {
+          const checked = checkboxValues[r][c];
+          if (checked === true) {
+            const dateVal = dateRowValues[c];
+            if (!dateVal) continue;
+            maybeAddLogRow_(lastName, firstName, 'Sunday Service', dateVal);
+          }
+        }
+      }
+    }
+  } else {
+    Logger.log('Sheet "Sunday Service" not found.');
+  }
+
+  // --- 2) From "Event Attendance" ---
+  if (eventSheet) {
+    const evtDataStartRow = 5;   // data row 5
+    const evtDataStartCol = 9;   // column I
+    const lastRow = eventSheet.getLastRow();
+    const lastCol = eventSheet.getLastColumn();
+
+    if (lastRow >= evtDataStartRow && lastCol >= evtDataStartCol) {
+      const numRows = lastRow - evtDataStartRow + 1;
+      const numCols = lastCol - evtDataStartCol + 1;
+
+      const nameValues = eventSheet.getRange(evtDataStartRow, 3, numRows, 2).getValues(); // C–D
+      const checkboxValues = eventSheet.getRange(evtDataStartRow, evtDataStartCol, numRows, numCols).getValues();
+
+      const dateRowValues = eventSheet.getRange(2, evtDataStartCol, 1, numCols).getValues()[0];
+      const eventNameValues = eventSheet.getRange(3, evtDataStartCol, 1, numCols).getValues()[0];
+
+      for (let c = 0; c < numCols; c++) {
+        const dateVal = dateRowValues[c];
+        const eventName = eventNameValues[c];
+
+        // Only process if:
+        // - Row 2 has date
+        // - Row 3 has event name
+        // - Row 3 is NOT "Post event name here"
+        if (!dateVal) continue;
+        if (!eventName) continue;
+        if (String(eventName).trim() === 'Post event name here') continue;
+
+        for (let r = 0; r < numRows; r++) {
+          const checked = checkboxValues[r][c];
+          if (checked === true) {
+            const lastName = nameValues[r][0];
+            const firstName = nameValues[r][1];
+            if (!lastName && !firstName) continue;
+            maybeAddLogRow_(lastName, firstName, eventName, dateVal);
+          }
+        }
+      }
+    }
+  } else {
+    Logger.log('Sheet "Event Attendance" not found.');
+  }
+
+  // --- Write new rows into Attendance Log ---
+  if (newRows.length > 0) {
+    const startRow = lastLogRow > 1 ? lastLogRow + 1 : 2;
+    logSheet.getRange(startRow, 1, newRows.length, 9).setValues(newRows);
+    Logger.log(`Added ${newRows.length} new attendance rows into "Attendance Log".`);
+  } else {
+    Logger.log('No new attendance rows to add into "Attendance Log".');
+  }
+}
