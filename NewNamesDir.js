@@ -269,14 +269,17 @@ function getNextAvailableRow_(sheet, dataStartRow, lastNameCol, firstNameCol) {
 /**
  * Builds a normalized name key from Last Name + First Name.
  * This helps avoid duplicates caused by spacing/case/punctuation differences.
+ *
+ * UPDATED: now keeps digits as well (A–Z, 0–9, accented letters),
+ * so "ngm 1" and "ngm 2" are treated as different people.
  */
 function buildNameKey_(lastName, firstName) {
   const ln = (lastName || '').toString().trim().toLowerCase();
   const fn = (firstName || '').toString().trim().toLowerCase();
   if (!ln && !fn) return null;
 
-  const cleanLn = ln.replace(/[^A-Za-z\u00C0-\u024F]/g, '');
-  const cleanFn = fn.replace(/[^A-Za-z\u00C0-\u024F]/g, '');
+  const cleanLn = ln.replace(/[^A-Za-z0-9\u00C0-\u024F]/g, '');
+  const cleanFn = fn.replace(/[^A-Za-z0-9\u00C0-\u024F]/g, '');
   if (!cleanLn && !cleanFn) return null;
 
   return cleanLn + '|' + cleanFn;
