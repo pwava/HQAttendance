@@ -118,6 +118,22 @@ function updateGuestData() {
     if (numRows > 0) {
       guestsSheet.getRange(startRow, 2, numRows, 6).setValues(finalData);
       guestsSheet.getRange(startRow, 5, numRows, 3).setNumberFormat("MM-dd-yy");
+      // Copy Registration Date (G) into Column H when G has a date
+const regCol = guestsSheet.getRange(startRow, 7, numRows, 1).getValues(); // G
+const targetH = [];
+
+for (let i = 0; i < regCol.length; i++) {
+  const val = regCol[i][0];
+  if (val instanceof Date) {
+    targetH.push([val]);   // copy date
+  } else {
+    targetH.push([""]);    // empty
+  }
+}
+
+guestsSheet.getRange(startRow, 8, numRows, 1).setValues(targetH); // H
+guestsSheet.getRange(startRow, 8, numRows, 1).setNumberFormat("MM-dd-yy");
+
     }
 
     Logger.log("Guest data updated successfully.");
@@ -327,7 +343,7 @@ function updateExistingGuestDates() {
       Logger.log("No guests to update.");
       return;
     }
-    
+
     const numRows = lastRow - startRow + 1;
     const dataRange = guestsSheet.getRange(startRow, 3, numRows, 5); // C:G
     const values = dataRange.getValues();
@@ -340,7 +356,7 @@ function updateExistingGuestDates() {
       const row = values[i];
       const lastName = String(row[0]).trim();
       const firstName = String(row[1]).trim();
-      
+
       let serviceDate = row[2];
       let introDate = row[3];
       let regDate = row[4];
@@ -353,7 +369,7 @@ function updateExistingGuestDates() {
             serviceDate = serviceMap.get(key);
             updatesMade++;
           }
-          
+
           if (!introDate) {
             if (introMap.has(key)) {
               introDate = introMap.get(key);
@@ -373,24 +389,41 @@ function updateExistingGuestDates() {
           }
         }
       }
-      
+
       datesToWrite.push([serviceDate, introDate, regDate]);
     }
 
-    // 4. Write all updated dates back
+    // 4. Write updated dates for E:F:G (only if something actually changed)
     if (updatesMade > 0) {
       const dateRangeToWrite = guestsSheet.getRange(startRow, 5, numRows, 3); // E:G
       dateRangeToWrite.setValues(datesToWrite);
       dateRangeToWrite.setNumberFormat("MM-dd-yy");
-      Logger.log(`Updated ${updatesMade} blank dates for existing guests.`);
+      Logger.log("Updated " + updatesMade + " blank dates for existing guests.");
     } else {
       Logger.log("No blank dates found to update.");
     }
+
+    // 5. ALWAYS: copy Registration (G) into Full (H) when G has a date
+    const regCol = guestsSheet.getRange(startRow, 7, numRows, 1).getValues(); // G
+    const hValues = [];
+
+    for (let i = 0; i < regCol.length; i++) {
+      const val = regCol[i][0];
+      if (val instanceof Date) {
+        hValues.push([val]);   // copy date from G
+      } else {
+        hValues.push([""]);    // keep blank if G is blank or not a date
+      }
+    }
+
+    guestsSheet.getRange(startRow, 8, numRows, 1).setValues(hValues); // H
+    guestsSheet.getRange(startRow, 8, numRows, 1).setNumberFormat("MM-dd-yy");
 
   } catch (e) {
     Logger.log("Error in updateExistingGuestDates: " + e);
   }
 }
+
 
 
 /**
