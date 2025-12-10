@@ -1,10 +1,10 @@
 /**
  * A more robust function to clean and standardize names.
- * Removes all spaces and keeps only letters/numbers/commas for a consistent key.
+ * Removes all spaces and keeps only letters/commas for a consistent key.
  */
 function normalizeName(name) {
   if (!name) return '';
-  return name.toString().toLowerCase().replace(/[^a-z0-9,]/g, '').trim();
+  return name.toString().toLowerCase().replace(/[^a-z,]/g, '').trim();
 }
 
 /**
@@ -407,13 +407,13 @@ function performFinalSort() {
 
     // Then sort alphabetically by Last Name (Column C, index 2)
     const lastA = (a[2] || "").toString().toLowerCase();
-    const lastB = (a[2] || "").toString().toLowerCase();
+    const lastB = (b[2] || "").toString().toLowerCase();
     if (lastA < lastB) return -1;
     if (lastA > lastB) return 1;
 
     // Optional tie-breaker by First Name (Column D, index 3)
     const firstA = (a[3] || "").toString().toLowerCase();
-    const firstB = (a[3] || "").toString().toLowerCase();
+    const firstB = (b[3] || "").toString().toLowerCase();
     if (firstA < firstB) return -1;
     if (firstA > firstB) return 1;
 
