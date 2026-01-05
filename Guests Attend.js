@@ -1,4 +1,35 @@
 /**
+ * Normalize Personal ID for matching (keep letters+numbers only).
+ */
+function normalizePersonalId(id) {
+  if (!id) return '';
+  return String(id).toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Build a member key used for matching:
+ * PersonalID + Last + First
+ *
+ * - If Personal ID exists: "pid|lastname|firstname"
+ * - If Personal ID is blank: fall back to original name-only behavior:
+ *   - both last & first: "lastname,firstname"
+ *   - only last: "lastname"
+ *   - only first: "firstname"
+ */
+function buildGuestKey(personalId, lastName, firstName) {
+  const pid = normalizePersonalId(personalId);
+  const ln = String(lastName || "").trim().toLowerCase();
+  const fn = String(firstName || "").trim().toLowerCase();
+
+  if (pid) return pid + "|" + ln + "|" + fn;
+
+  if (ln && fn) return ln + "," + fn;
+  if (ln) return ln;
+  if (fn) return fn;
+  return "";
+}
+
+/**
  * Main function to be run manually to update the "Guests" tab.
  * This script gathers data from "Sunday Service", "Event Attendance",
  * and an external "Directory" sheet to populate guest information.
@@ -37,23 +68,22 @@ function updateGuestData() {
     }
 
     // 4. Get Unique Guest List
-    // ONLY those who have attendance in Sunday Service or Event Attendance
-    // AND have Column H = "Guest"
-    // PLUS any "Pastoral check -In" names that are not in Directory
     const uniqueGuests = getUniqueGuests(serviceSheet, eventSheet, attendanceLogSheet);
 
     // 5. Process and Prepare Data for Writing
     const finalData = [];
 
     // Filter out anyone already in Directory (they are NOT guests)
+    // Matching is PersonalID + Last + First (Directory Personal ID is Column Z)
     const filteredGuests = [];
     for (const guest of uniqueGuests.values()) {
-      const ln = String(guest.lastName || "").trim();
-      const fn = String(guest.firstName || "").trim();
+      const pid = normalizePersonalId(guest.personalId);
+      const ln = String(guest.lastName || "").trim().toLowerCase();
+      const fn = String(guest.firstName || "").trim().toLowerCase();
       let inDirectory = false;
 
-      if (ln && fn) {
-        const dirKey = (ln + "," + fn).toLowerCase();
+      if (pid) {
+        const dirKey = buildGuestKey(pid, ln, fn);
         if (directoryMap.has(dirKey)) {
           inDirectory = true;
         }
@@ -75,8 +105,7 @@ function updateGuestData() {
 
     // Build the final array for the "Guests" sheet.
     for (const guest of sortedGuests) {
-      const key = buildGuestKey(guest.lastName, guest.firstName);
-      const fullName = guest.firstName + " " + guest.lastName;
+      const key = buildGuestKey(guest.personalId, guest.lastName, guest.firstName);
 
       const serviceDate = key ? (serviceMap.get(key) || "") : "";
 
@@ -89,14 +118,15 @@ function updateGuestData() {
       // Registration date from Directory (will normally be blank for true guests,
       // because we filtered out those already in Directory)
       let regDate = "";
-      if (guest.lastName && guest.firstName) {
-        const dirKey = (guest.lastName + "," + guest.firstName).toLowerCase();
+      if (normalizePersonalId(guest.personalId)) {
+        const dirKey = buildGuestKey(guest.personalId, guest.lastName, guest.firstName);
         regDate = directoryMap.get(dirKey) || "";
       }
 
       // Match the column order: B, C, D, E, F, G
+      // B = Personal ID (replaces Full Name)
       finalData.push([
-        fullName,
+        guest.personalId || "",
         guest.lastName,
         guest.firstName,
         serviceDate,
@@ -108,7 +138,7 @@ function updateGuestData() {
     // 6. Write Data to Guests Sheet
     const startRow = 4;
     const numRows = finalData.length;
-    
+
     // Clear old data from row 4 downwards, columns B-G
     if (guestsSheet.getLastRow() >= startRow) {
       guestsSheet.getRange(startRow, 2, guestsSheet.getLastRow() - startRow + 1, 6).clearContent();
@@ -118,22 +148,22 @@ function updateGuestData() {
     if (numRows > 0) {
       guestsSheet.getRange(startRow, 2, numRows, 6).setValues(finalData);
       guestsSheet.getRange(startRow, 5, numRows, 3).setNumberFormat("MM-dd-yy");
+
       // Copy Registration Date (G) into Column H when G has a date
-const regCol = guestsSheet.getRange(startRow, 7, numRows, 1).getValues(); // G
-const targetH = [];
+      const regCol = guestsSheet.getRange(startRow, 7, numRows, 1).getValues(); // G
+      const targetH = [];
 
-for (let i = 0; i < regCol.length; i++) {
-  const val = regCol[i][0];
-  if (val instanceof Date) {
-    targetH.push([val]);   // copy date
-  } else {
-    targetH.push([""]);    // empty
-  }
-}
+      for (let i = 0; i < regCol.length; i++) {
+        const val = regCol[i][0];
+        if (val instanceof Date) {
+          targetH.push([val]);
+        } else {
+          targetH.push([""]);
+        }
+      }
 
-guestsSheet.getRange(startRow, 8, numRows, 1).setValues(targetH); // H
-guestsSheet.getRange(startRow, 8, numRows, 1).setNumberFormat("MM-dd-yy");
-
+      guestsSheet.getRange(startRow, 8, numRows, 1).setValues(targetH); // H
+      guestsSheet.getRange(startRow, 8, numRows, 1).setNumberFormat("MM-dd-yy");
     }
 
     Logger.log("Guest data updated successfully.");
@@ -164,17 +194,19 @@ function addNewGuests() {
     const existingGuestsSet = new Set();
     const startRow = 4;
     if (guestsSheet.getLastRow() >= startRow) {
-      const existingNames = guestsSheet.getRange(startRow, 3, guestsSheet.getLastRow() - startRow + 1, 2).getValues(); // C:D
-      for (const row of existingNames) {
-        const lastName = String(row[0]).trim();
-        const firstName = String(row[1]).trim();
-        const key = buildGuestKey(lastName, firstName);
+      // B:D = PersonalID, Last, First
+      const existing = guestsSheet.getRange(startRow, 2, guestsSheet.getLastRow() - startRow + 1, 3).getValues(); // B:D
+      for (const row of existing) {
+        const personalId = String(row[0] || "").trim();
+        const lastName = String(row[1] || "").trim();
+        const firstName = String(row[2] || "").trim();
+        const key = buildGuestKey(personalId, lastName, firstName);
         if (key) {
           existingGuestsSet.add(key);
         }
       }
     }
-    
+
     // 2. Get ALL unique guests from the source tabs
     const allGuestsMap = getUniqueGuests(serviceSheet, eventSheet, attendanceLogSheet);
 
@@ -182,7 +214,7 @@ function addNewGuests() {
     const newGuests = [];
     for (const [key, guest] of allGuestsMap.entries()) {
       if (!existingGuestsSet.has(key)) {
-        newGuests.push(guest); // guest is { firstName, lastName }
+        newGuests.push(guest);
       }
     }
 
@@ -217,12 +249,13 @@ function addNewGuests() {
     });
 
     for (const guest of newGuests) {
-      const ln = String(guest.lastName || "").trim();
-      const fn = String(guest.firstName || "").trim();
+      const pid = normalizePersonalId(guest.personalId);
+      const ln = String(guest.lastName || "").trim().toLowerCase();
+      const fn = String(guest.firstName || "").trim().toLowerCase();
       let inDirectory = false;
 
-      if (ln && fn) {
-        const dirKey = (ln + "," + fn).toLowerCase();
+      if (pid) {
+        const dirKey = buildGuestKey(pid, ln, fn);
         if (directoryMap.has(dirKey)) {
           inDirectory = true;
         }
@@ -233,8 +266,7 @@ function addNewGuests() {
         continue;
       }
 
-      const fullName = guest.firstName + " " + guest.lastName;
-      const key = buildGuestKey(guest.lastName, guest.firstName);
+      const key = buildGuestKey(guest.personalId, guest.lastName, guest.firstName);
 
       const serviceDate = key ? (serviceMap.get(key) || "") : "";
 
@@ -244,14 +276,14 @@ function addNewGuests() {
       }
 
       let regDate = "";
-      if (guest.lastName && guest.firstName) {
-        const dirKey = (guest.lastName + "," + guest.firstName).toLowerCase();
-        regDate = directoryMap.get(dirKey) || "";
+      if (pid) {
+        const dirKey2 = buildGuestKey(guest.personalId, guest.lastName, guest.firstName);
+        regDate = directoryMap.get(dirKey2) || "";
       }
 
-      // B: Full Name, C: Last, D: First, E: Service, F: Intro, G: Reg
+      // B: Personal ID, C: Last, D: First, E: Service, F: Intro, G: Reg
       finalData.push([
-        fullName,
+        guest.personalId || "",
         guest.lastName,
         guest.firstName,
         serviceDate,
@@ -266,6 +298,7 @@ function addNewGuests() {
     const blankRows = [];
 
     if (existingLastRow >= dataStartRow) {
+      // Check C:D (Last, First) for blanks (original behavior)
       const nameValues = guestsSheet.getRange(dataStartRow, 3, existingLastRow - dataStartRow + 1, 2).getValues(); // C:D
       for (let i = 0; i < nameValues.length; i++) {
         const ln = String(nameValues[i][0]).trim();
@@ -281,12 +314,8 @@ function addNewGuests() {
     // Fill existing empty rows
     for (let i = 0; i < blankRows.length && dataIndex < finalData.length; i++, dataIndex++) {
       const rowIndex = blankRows[i];
-      guestsSheet
-        .getRange(rowIndex, 2, 1, 6)
-        .setValues([finalData[dataIndex]]);
-      guestsSheet
-        .getRange(rowIndex, 5, 1, 3)
-        .setNumberFormat("MM-dd-yy");
+      guestsSheet.getRange(rowIndex, 2, 1, 6).setValues([finalData[dataIndex]]);
+      guestsSheet.getRange(rowIndex, 5, 1, 3).setNumberFormat("MM-dd-yy");
     }
 
     // Append remaining new guests
@@ -298,7 +327,7 @@ function addNewGuests() {
       newRowsRange.offset(0, 3, remaining.length, 3).setNumberFormat("MM-dd-yy");
     }
 
-    Logger.log(`Added ${finalData.length} new guests with their dates.`);
+    Logger.log("Added " + finalData.length + " new guests with their dates.");
 
   } catch (e) {
     Logger.log("Error in addNewGuests: " + e);
@@ -345,7 +374,8 @@ function updateExistingGuestDates() {
     }
 
     const numRows = lastRow - startRow + 1;
-    const dataRange = guestsSheet.getRange(startRow, 3, numRows, 5); // C:G
+    // B:G = PersonalID, Last, First, Service, Intro, Reg
+    const dataRange = guestsSheet.getRange(startRow, 2, numRows, 6); // B:G
     const values = dataRange.getValues();
 
     let updatesMade = 0;
@@ -354,15 +384,17 @@ function updateExistingGuestDates() {
     // 3. Loop through each guest and fill in blank dates
     for (let i = 0; i < values.length; i++) {
       const row = values[i];
-      const lastName = String(row[0]).trim();
-      const firstName = String(row[1]).trim();
 
-      let serviceDate = row[2];
-      let introDate = row[3];
-      let regDate = row[4];
+      const personalId = String(row[0] || "").trim(); // B
+      const lastName = String(row[1] || "").trim();   // C
+      const firstName = String(row[2] || "").trim();  // D
 
-      if (lastName || firstName) {
-        const key = buildGuestKey(lastName, firstName);
+      let serviceDate = row[3]; // E
+      let introDate = row[4];   // F
+      let regDate = row[5];     // G
+
+      if (lastName || firstName || personalId) {
+        const key = buildGuestKey(personalId, lastName, firstName);
 
         if (key) {
           if (!serviceDate && serviceMap.has(key)) {
@@ -380,8 +412,9 @@ function updateExistingGuestDates() {
             }
           }
 
-          if (!regDate && lastName && firstName) {
-            const dirKey = (lastName + "," + firstName).toLowerCase();
+          // Registration date from Directory uses PersonalID+Last+First
+          if (!regDate && normalizePersonalId(personalId)) {
+            const dirKey = buildGuestKey(personalId, lastName, firstName);
             if (directoryMap.has(dirKey)) {
               regDate = directoryMap.get(dirKey);
               updatesMade++;
@@ -390,14 +423,13 @@ function updateExistingGuestDates() {
         }
       }
 
-      datesToWrite.push([serviceDate, introDate, regDate]);
+      datesToWrite.push([personalId, lastName, firstName, serviceDate, introDate, regDate]);
     }
 
-    // 4. Write updated dates for E:F:G (only if something actually changed)
+    // 4. Write updated rows (only if something actually changed)
     if (updatesMade > 0) {
-      const dateRangeToWrite = guestsSheet.getRange(startRow, 5, numRows, 3); // E:G
-      dateRangeToWrite.setValues(datesToWrite);
-      dateRangeToWrite.setNumberFormat("MM-dd-yy");
+      dataRange.setValues(datesToWrite);
+      guestsSheet.getRange(startRow, 5, numRows, 3).setNumberFormat("MM-dd-yy");
       Logger.log("Updated " + updatesMade + " blank dates for existing guests.");
     } else {
       Logger.log("No blank dates found to update.");
@@ -410,9 +442,9 @@ function updateExistingGuestDates() {
     for (let i = 0; i < regCol.length; i++) {
       const val = regCol[i][0];
       if (val instanceof Date) {
-        hValues.push([val]);   // copy date from G
+        hValues.push([val]);
       } else {
-        hValues.push([""]);    // keep blank if G is blank or not a date
+        hValues.push([""]);
       }
     }
 
@@ -424,12 +456,12 @@ function updateExistingGuestDates() {
   }
 }
 
-
-
 /**
  * Gets registration data from the external Directory sheet.
+ * Directory Personal ID is column Z.
+ *
  * @param {string} sheetId The ID of the external Google Sheet.
- * @returns {Map<string, Date>} A Map where key is "lastname,firstname"
+ * @returns {Map<string, Date>} A Map where key is "pid|lastname|firstname"
  * and value is the registration Date object.
  */
 function getDirectoryData(sheetId) {
@@ -441,17 +473,23 @@ function getDirectoryData(sheetId) {
       Logger.log("Error: 'Directory' tab not found in external sheet.");
       return directoryMap;
     }
-    
-    // Data starts from row 2 (assuming row 1 is header)
-    const data = sheet.getRange(2, 3, sheet.getLastRow() - 1, 19).getValues(); // C to U
+
+    // Data starts from row 2
+    // Read C:Z so we can get Last (C), First (D), RegDate (U), PersonalID (Z)
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return directoryMap;
+
+    const data = sheet.getRange(2, 3, lastRow - 1, 24).getValues(); // C to Z
 
     for (const row of data) {
-      const lastName = String(row[0]).trim();  // Column C (index 0)
-      const firstName = String(row[1]).trim(); // Column D (index 1)
-      const regDate = row[18]; // Column U (index 18)
+      const lastName = String(row[0] || "").trim();   // C
+      const firstName = String(row[1] || "").trim();  // D
+      const regDate = row[18];                        // U
+      const personalId = row[23];                     // Z
 
-      if (firstName && lastName && regDate instanceof Date) {
-        const key = (lastName + "," + firstName).toLowerCase();
+      const pid = normalizePersonalId(personalId);
+      if (pid && (firstName || lastName) && regDate instanceof Date) {
+        const key = buildGuestKey(pid, lastName, firstName);
         if (!directoryMap.has(key)) {
           directoryMap.set(key, regDate);
         }
@@ -467,28 +505,29 @@ function getDirectoryData(sheetId) {
 /**
  * Gets the first service date for all GUESTS from the "Sunday Service" sheet.
  * Uses Column H = "Guest" and allows first-name-only or last-name-only.
+ * Also uses Personal ID in Column B when present.
+ *
  * @param {Sheet} sheet The "Sunday Service" Google Sheet object.
- * @returns {Map<string, Date>} A Map where key is name key (via buildGuestKey)
+ * @returns {Map<string, Date>} A Map where key is buildGuestKey(personalId,last,first)
  * and value is the first service Date object.
  */
 function getServiceData(sheet) {
   const serviceMap = new Map();
-  const dataRange = sheet.getDataRange();
-  const values = dataRange.getValues();
-  
+  const values = sheet.getDataRange().getValues();
+
   // Get service dates from row 2, starting column I (index 8)
   const serviceDates = values[1].slice(8);
-  
+
   // Data starts from row 4 (index 3)
   for (let i = 3; i < values.length; i++) {
     const row = values[i];
-    const lastName = String(row[2]).trim();  // Column C (index 2)
-    const firstName = String(row[3]).trim(); // Column D (index 3)
-    const status = String(row[7]).trim();    // Column H (index 7)
+    const personalId = String(row[1] || "").trim();   // Column B (index 1)
+    const lastName = String(row[2] || "").trim();     // Column C (index 2)
+    const firstName = String(row[3] || "").trim();    // Column D (index 3)
+    const status = String(row[7] || "").trim();       // Column H (index 7)
 
-    // Only rows marked Guest, and have at least first OR last name
     if ((firstName || lastName) && status === "Guest") {
-      const key = buildGuestKey(lastName, firstName);
+      const key = buildGuestKey(personalId, lastName, firstName);
       if (!key) continue;
 
       if (!serviceMap.has(key)) {
@@ -508,52 +547,40 @@ function getServiceData(sheet) {
 }
 
 /**
- * Gets the first "Community Intro" date for all GUESTS
- * from the "Event Attendance" sheet.
- * Uses Column H = "Guest" and allows first-name-only or last-name-only.
- * @param {Sheet} sheet The "Event Attendance" Google Sheet object.
- * @returns {Map<string, Date>} A Map where key is name key (via buildGuestKey)
- * and value is the event Date object.
- */
-/**
  * Gets the first "Intro/Orientation" date for all GUESTS
  * from the "Event Attendance" sheet.
  * Uses Column H = "Guest" and allows first-name-only or last-name-only.
+ * Also uses Personal ID in Column B when present.
+ *
  * @param {Sheet} sheet The "Event Attendance" Google Sheet object.
- * @returns {Map<string, Date>} A Map where key is name key (via buildGuestKey)
+ * @returns {Map<string, Date>} A Map where key is buildGuestKey(personalId,last,first)
  * and value is the event Date object.
  */
 function getIntroData(sheet) {
   const introMap = new Map();
-  const dataRange = sheet.getDataRange();
-  const values = dataRange.getValues();
+  const values = sheet.getDataRange().getValues();
 
-  // Get event dates from row 2, starting column I (index 8)
   const eventDates = values[1].slice(8); // Row 2
-  
-  // Get event names from row 3, starting column I (index 8)
   const eventNames = values[2].slice(8); // Row 3
-  
+
   // Data starts from row 5 (index 4)
   for (let i = 4; i < values.length; i++) {
     const row = values[i];
-    const lastName = String(row[2]).trim();  // Column C (index 2)
-    const firstName = String(row[3]).trim(); // Column D (index 3)
-    const status = String(row[7]).trim();    // Column H (index 7)
+    const personalId = String(row[1] || "").trim();  // Column B (index 1)
+    const lastName = String(row[2] || "").trim();    // Column C (index 2)
+    const firstName = String(row[3] || "").trim();   // Column D (index 3)
+    const status = String(row[7] || "").trim();      // Column H (index 7)
 
-    // Only rows marked Guest, and have at least first OR last name
     if ((firstName || lastName) && status === "Guest") {
-      const key = buildGuestKey(lastName, firstName);
+      const key = buildGuestKey(personalId, lastName, firstName);
       if (!key) continue;
 
       if (!introMap.has(key)) {
         const attendance = row.slice(8);
         for (let j = 0; j < attendance.length; j++) {
-          if (attendance[j] === true) { 
-            const eventName = String(eventNames[j]).toLowerCase();
+          if (attendance[j] === true) {
+            const eventName = String(eventNames[j] || "").toLowerCase();
 
-            // Match any event whose name contains "community intro",
-            // "orientation", or "orient"
             if (
               eventName.includes("community intro") ||
               eventName.includes("orientation") ||
@@ -573,33 +600,32 @@ function getIntroData(sheet) {
   return introMap;
 }
 
-
 /**
  * Gets the first "Pastoral check -In" date for all names
  * from the "Attendance Log" sheet.
+ *
  * Uses:
+ * - Column B: Personal ID
  * - Column C: Last Name
  * - Column D: First Name
- * - Column B: Date
+ * - Column B (Date) is still index 1 in this sheet as per your original script
  * - Column F: Event name (must be "Pastoral check -In")
  *
- * Allows first-name-only or last-name-only, using buildGuestKey.
- *
  * @param {Sheet} sheet The "Attendance Log" sheet.
- * @returns {Map<string, Date>} A Map where key is name key (via buildGuestKey)
+ * @returns {Map<string, Date>} A Map where key is buildGuestKey(personalId,last,first)
  * and value is the first Pastoral Check-In Date object.
  */
 function getPastoralIntroData(sheet) {
   const pastoralMap = new Map();
-  const dataRange = sheet.getDataRange();
-  const values = dataRange.getValues();
+  const values = sheet.getDataRange().getValues();
 
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
-    const lastName = String(row[2]).trim();  // Column C (index 2)
-    const firstName = String(row[3]).trim(); // Column D (index 3)
-    const dateVal = row[1];                  // Column B (index 1)
-    const eventNameRaw = String(row[5]).trim(); // Column F (index 5)
+    const personalId = String(row[1] || "").trim();     // Column B (index 1)
+    const lastName = String(row[2] || "").trim();       // Column C (index 2)
+    const firstName = String(row[3] || "").trim();      // Column D (index 3)
+    const dateVal = row[1];                             // Column B (index 1) (original)
+    const eventNameRaw = String(row[5] || "").trim();   // Column F (index 5)
 
     if (!firstName && !lastName) {
       continue;
@@ -608,7 +634,7 @@ function getPastoralIntroData(sheet) {
     const eventName = eventNameRaw.toLowerCase();
     if (eventName === "pastoral check -in") {
       if (dateVal instanceof Date) {
-        const key = buildGuestKey(lastName, firstName);
+        const key = buildGuestKey(personalId, lastName, firstName);
         if (!key) continue;
 
         if (!pastoralMap.has(key)) {
@@ -627,41 +653,15 @@ function getPastoralIntroData(sheet) {
 }
 
 /**
- * Build a name key that also works when only first name or only last name
- * is present. Used for de-duplicating guests and matching across functions.
- *
- * Rules:
- * - If both last & first: "lastname,firstname" (lowercase)
- * - If only last: "lastname"
- * - If only first: "firstname"
- * - If both empty: "" (no key)
- */
-function buildGuestKey(lastName, firstName) {
-  const ln = String(lastName || "").trim().toLowerCase();
-  const fn = String(firstName || "").trim().toLowerCase();
-  if (ln && fn) return ln + "," + fn;
-  if (ln) return ln;
-  if (fn) return fn;
-  return "";
-}
-
-/**
  * Compiles a unique list of GUESTS from:
  * - Sunday Service (Column H = "Guest", with attendance)
  * - Event Attendance (Column H = "Guest", with attendance)
  * - Attendance Log: "Pastoral check -In" rows
  *
- * For Pastoral Check-In:
- * - We collect all "Pastoral check -In" names here as guest candidates.
- * - Later, the caller filters out those already in Directory.
+ * Uses Personal ID from Column B of each source sheet when present.
  *
- * Allows first-name-only or last-name-only (using buildGuestKey).
- *
- * @param {Sheet} serviceSheet The "Sunday Service" sheet.
- * @param {Sheet} eventSheet The "Event Attendance" sheet.
- * @param {Sheet} attendanceLogSheet The "Attendance Log" sheet (optional).
- * @returns {Map<string, Object>} A Map of unique guests,
- * with key from buildGuestKey and {firstName, lastName} as value.
+ * @returns {Map<string, Object>} key = buildGuestKey(personalId,last,first)
+ * value = { personalId, firstName, lastName }
  */
 function getUniqueGuests(serviceSheet, eventSheet, attendanceLogSheet) {
   const guests = new Map();
@@ -669,21 +669,21 @@ function getUniqueGuests(serviceSheet, eventSheet, attendanceLogSheet) {
   // --- 1. Guests from Sunday Service WITH attendance ---
   const serviceValues = serviceSheet.getDataRange().getValues();
   if (serviceValues.length >= 4) {
-    for (let i = 3; i < serviceValues.length; i++) { // Data from row 4
+    for (let i = 3; i < serviceValues.length; i++) {
       const row = serviceValues[i];
-      const lastName = String(row[2]).trim();  // Col C
-      const firstName = String(row[3]).trim(); // Col D
-      const status = String(row[7]).trim();    // Col H
+      const personalId = String(row[1] || "").trim(); // Col B
+      const lastName = String(row[2] || "").trim();   // Col C
+      const firstName = String(row[3] || "").trim();  // Col D
+      const status = String(row[7] || "").trim();     // Col H
 
-      // Must be marked Guest, and have at least first or last name
       if ((firstName || lastName) && status === "Guest") {
-        const attendance = row.slice(8); // Checkboxes from Col I onwards
+        const attendance = row.slice(8);
         const hasAttendance = attendance.some(v => v === true);
 
         if (hasAttendance) {
-          const key = buildGuestKey(lastName, firstName);
+          const key = buildGuestKey(personalId, lastName, firstName);
           if (key && !guests.has(key)) {
-            guests.set(key, { firstName: firstName, lastName: lastName });
+            guests.set(key, { personalId: personalId, firstName: firstName, lastName: lastName });
           }
         }
       }
@@ -693,20 +693,21 @@ function getUniqueGuests(serviceSheet, eventSheet, attendanceLogSheet) {
   // --- 2. Guests from Event Attendance WITH attendance ---
   const eventValues = eventSheet.getDataRange().getValues();
   if (eventValues.length >= 5) {
-    for (let i = 4; i < eventValues.length; i++) { // Data from row 5
+    for (let i = 4; i < eventValues.length; i++) {
       const row = eventValues[i];
-      const lastName = String(row[2]).trim();  // Col C
-      const firstName = String(row[3]).trim(); // Col D
-      const status = String(row[7]).trim();    // Col H
+      const personalId = String(row[1] || "").trim(); // Col B
+      const lastName = String(row[2] || "").trim();   // Col C
+      const firstName = String(row[3] || "").trim();  // Col D
+      const status = String(row[7] || "").trim();     // Col H
 
       if ((firstName || lastName) && status === "Guest") {
-        const attendance = row.slice(8); // Checkboxes from Col I onwards
+        const attendance = row.slice(8);
         const hasAttendance = attendance.some(v => v === true);
 
         if (hasAttendance) {
-          const key = buildGuestKey(lastName, firstName);
+          const key = buildGuestKey(personalId, lastName, firstName);
           if (key && !guests.has(key)) {
-            guests.set(key, { firstName: firstName, lastName: lastName });
+            guests.set(key, { personalId: personalId, firstName: firstName, lastName: lastName });
           }
         }
       }
@@ -717,11 +718,12 @@ function getUniqueGuests(serviceSheet, eventSheet, attendanceLogSheet) {
   if (attendanceLogSheet) {
     const logValues = attendanceLogSheet.getDataRange().getValues();
     if (logValues.length >= 2) {
-      for (let i = 1; i < logValues.length; i++) { // Data from row 2
+      for (let i = 1; i < logValues.length; i++) {
         const row = logValues[i];
-        const lastName = String(row[2]).trim();  // Col C
-        const firstName = String(row[3]).trim(); // Col D
-        const eventNameRaw = String(row[5]).trim(); // Col F
+        const personalId = String(row[1] || "").trim();  // Col B
+        const lastName = String(row[2] || "").trim();    // Col C
+        const firstName = String(row[3] || "").trim();   // Col D
+        const eventNameRaw = String(row[5] || "").trim(); // Col F
 
         if (!firstName && !lastName) {
           continue;
@@ -729,14 +731,14 @@ function getUniqueGuests(serviceSheet, eventSheet, attendanceLogSheet) {
 
         const eventName = eventNameRaw.toLowerCase();
         if (eventName === "pastoral check -in") {
-          const key = buildGuestKey(lastName, firstName);
+          const key = buildGuestKey(personalId, lastName, firstName);
           if (key && !guests.has(key)) {
-            guests.set(key, { firstName: firstName, lastName: lastName });
+            guests.set(key, { personalId: personalId, firstName: firstName, lastName: lastName });
           }
         }
       }
     }
   }
-  
+
   return guests;
 }
