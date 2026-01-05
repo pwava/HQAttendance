@@ -1,222 +1,210 @@
 /**
-* Processes the 'Attendance Log' sheet and updates 'Sunday Service' and 'Event Attendance' sheets.
-*
-* - Only processes rows where Column I (Status) is blank.
-* - Marks successfully processed rows as "Logged" in Column I.
-* - Logs with event "Sunday Service" go to the 'Sunday Service' sheet.
-* - Logs with event "Pastoral Check-In" go to the 'Pastoral Check-In' sheet.
-* - All other event logs go to the 'Event Attendance' sheet.
-* - 'Event Attendance' sheet dynamically adds new columns for new event/date combinations.
-* - New names found in the log ("Guests") are automatically added to the
-* *next available blank row* in 'Sunday Service', 'Pastoral Check-In', or 'Event Attendance'.
-* - New names are **properly capitalized** (e.g., "Smith, John").
-*/
+ * Processes the 'Attendance Log' sheet and updates:
+ * - Sunday Service
+ * - Event Attendance
+ * - Pastoral Check-In
+ *
+ * REFINEMENT (per request):
+ * - Matching uses Personal ID + Last Name + First Name.
+ * - Personal ID in Attendance Log is Column B.
+ * - Destination rows WITHOUT Personal ID in Column B are NOT used for matching.
+ * - If no match, script adds a new row (same as original behavior).
+ */
 function processAttendanceLogV2() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  
+
   // --- CONFIGURATION ---
   const logSheetName = 'Attendance Log';
   const sunServiceSheetName = 'Sunday Service';
-  const eventSheetName = 'Event Attendance'; // REFINED: Was 'Events'
+  const eventSheetName = 'Event Attendance';
   const pastoralSheetName = 'Pastoral Check-In';
-  
-  const nameColumnLetter = 'B'; // This is passed to prepareSheetData but will be ignored
-  const typeColumnLetter = 'F'; // Type column on all destination sheets
-  const typeColumnIndex = 6;  // Column F is index 6
-  
+
+  const typeColumnIndex = 6; // Column F in destination sheets
+
   // 'Sunday Service' sheet config
   const sunServiceDateRow = 2;
-  const sunServiceDataStartCol = 9; // REFINED: Was 7 (Column G), now 9 (Column I)
-  const sunServiceDataStartRow = 4; // Sunday Service data starts on row 4
+  const sunServiceDataStartCol = 9; // Column I
+  const sunServiceDataStartRow = 4; // data starts on row 4
 
   // 'Event Attendance' sheet config
   const eventDateRow = 2;
   const eventNameRow = 3;
-  const eventCountRow = 4;  
-  const eventDataStartCol = 9; // REFINED: Was 7 (Column G), now 9 (Column I)
-  const eventDataStartRow = 5; // Events data starts on row 5
-  
+  const eventCountRow = 4;
+  const eventDataStartCol = 9; // Column I
+  const eventDataStartRow = 5; // data starts on row 5
+
   // 'Pastoral Check-In' sheet config
-  const pastoralDataStartRow = 4; // 3 header rows, data starts on row 4
-  const pastoralRecentDateCol = 5;  // Column E
-  const pastoralPreviousDateCol = 6; // Column F
-  const pastoralNotesCol = 7; // Column G
-  const pastoralExtraCol = 8; // Column H (from Attendance Log Col L)
-  
-  // --- REFINEMENT ---
-  // Column I (index 9) is used for "Logged" status
-  const logStatusColumn = 9;  
-  // Column J (index 10) is used for "Remarks"
-  const logRemarksColumn = 10;
-  // Read from Col B (2) to Col L (12). 12 - 2 + 1 = 11 columns
-  const logNumColsToRead = 11;  
-  // --- Indices for the B:L logData array ---
-  const logLastNameIndex = 1;  // Col C
-  const logFirstNameIndex = 2; // Col D
-  const logTypeIndex = 3;      // Col E
-  const logStatusColIndex = 7; // Index of Status (Col I)
-  const logRemarksColIndex = 8; // Index of Remarks (Col J)
-  const logNotesColIndex = 9; // Col K (Notes for Pastoral Check-In)
-  const logExtraColIndex = 10; // Col L (extra for Pastoral Check-In -> Col H)
-  // --- END REFINEMENT ---
+  const pastoralDataStartRow = 4; // data starts on row 4
+  const pastoralRecentDateCol = 5;  // E
+  const pastoralPreviousDateCol = 6; // F
+  const pastoralNotesCol = 7; // G
+  const pastoralExtraCol = 8; // H
+
+  // Attendance Log columns
+  // We read B:L
+  // B=Personal ID, C=Last, D=First, E=Type, F=Event, G=Date, H=Timestamp, I=Status, J=Remarks, K=Notes, L=Extra
+  const logStatusColumn = 9;  // Column I
+  const logRemarksColumn = 10; // Column J
+  const logNumColsToRead = 11; // B..L
+
+  // Indices inside B:L array
+  const logPersonalIdIndex = 0; // Col B
+  const logLastNameIndex = 1;   // Col C
+  const logFirstNameIndex = 2;  // Col D
+  const logTypeIndex = 3;       // Col E
+  const logEventNameIndex = 4;  // Col F
+  const logEventDateIndex = 5;  // Col G
+  const logStatusColIndex = 7;  // Col I
+  const logRemarksColIndex = 8; // Col J
+  const logNotesColIndex = 9;   // Col K
+  const logExtraColIndex = 10;  // Col L
 
   const logSheet = ss.getSheetByName(logSheetName);
   if (!logSheet) {
-    Logger.log(`Error: Source sheet "${logSheetName}" not found.`);
+    Logger.log('Error: Source sheet "' + logSheetName + '" not found.');
     return;
   }
 
-  // 1. Read all attendance log data at once (B:L)
-  const logRange = logSheet.getRange(2, 2, logSheet.getLastRow() - 1, logNumColsToRead);  
+  const lastLogRow = logSheet.getLastRow();
+  if (lastLogRow < 2) {
+    Logger.log('No data rows in Attendance Log.');
+    return;
+  }
+
+  // 1) Read all attendance log data at once (B:L)
+  const logRange = logSheet.getRange(2, 2, lastLogRow - 1, logNumColsToRead);
   const logData = logRange.getValues();
-  
+
   const attendanceRecords = [];
-  
-  // --- REFINEMENT: Filter for unprocessed rows ---
+
+  // Filter for unprocessed rows
   for (let i = 0; i < logData.length; i++) {
     const row = logData[i];
-    const status = row[logStatusColIndex]; // Get status from Col I
+    const status = row[logStatusColIndex];
 
-    if (status === 'Logged') {
-      continue; // Skip this row, it's already done
-    }
-    
-    const eventName = row[4]; // Col F (index 4)
-    let eventDate = row[5]; // Col G (index 5)
-    
-    // --- REFINED LOGIC: Use C/D as the "source of truth" for the name ---
-    const logLastName = row[logLastNameIndex];  // Col C
-    const logFirstName = row[logFirstNameIndex]; // Col D
-    let standardizedName;
+    if (status === 'Logged') continue;
 
-    if (logLastName && logFirstName) {
-      // Use C/D as the "source of truth"
-      standardizedName = standardizeNameHelper(`${logLastName}, ${logFirstName}`);
-    } else {
-      // Fallback to Col B only if C/D are missing
-      const nameFromColB = row[0]; // Col B
-      if (!nameFromColB) {
-        continue; // No name at all, skip
-      }
-      standardizedName = standardizeNameHelper(nameFromColB);
+    const personalId = (row[logPersonalIdIndex] || '').toString().trim();
+    const lastNameRaw = (row[logLastNameIndex] || '').toString().trim();
+    const firstNameRaw = (row[logFirstNameIndex] || '').toString().trim();
+
+    const eventName = row[logEventNameIndex];
+    let eventDate = row[logEventDateIndex];
+
+    // We accept missing first OR last name (per your note), but Personal ID is expected for strong matching.
+    // If there's absolutely no name and no Personal ID, skip.
+    if (!personalId && !lastNameRaw && !firstNameRaw) {
+      continue;
     }
-    // --- END REFINED LOGIC ---
-    
-    // --- REFINED DATE CHECK: Try to fix text dates ---
+
+    // Fix/validate date
     if (!(eventDate instanceof Date) && eventDate) {
       try {
         eventDate = new Date(eventDate);
-        if (isNaN(eventDate.getTime())) { // Check if new Date() was valid
-          throw new Error("Invalid date string");
-        }
-      } catch(e) {
-        Logger.log(`Skipping log row ${i + 2} for "${standardizedName}": Invalid date format in Col G (${row[5]}).`);
-        logData[i][logRemarksColIndex] = "Skipped: Invalid date format.";
-        continue; // Date is not valid, skip this row
+        if (isNaN(eventDate.getTime())) throw new Error('Invalid date string');
+      } catch (e) {
+        logData[i][logRemarksColIndex] = 'Skipped: Invalid date format.';
+        continue;
       }
     }
-    // --- END REFINED DATE CHECK ---
 
-    if (eventName && eventDate instanceof Date && standardizedName) {
-      const formattedFullDate = `${eventDate.getMonth() + 1}-${eventDate.getDate()}-${eventDate.getFullYear()}`;
-      const formattedShortDate = `${eventDate.getMonth() + 1}-${eventDate.getDate()}`;
-      
-      attendanceRecords.push({
-        name: standardizedName,
-        eventName: eventName.toString().trim(),
-        eventDate: eventDate,
-        formattedFullDate: formattedFullDate, // M-D-YYYY
-        formattedShortDate: formattedShortDate, // M-D
-        notes: row[logNotesColIndex], // Col K
-        extra: row[logExtraColIndex], // Col L
-        originalLogRownum: i + 2
-      });
-    }
+    if (!eventName || !(eventDate instanceof Date)) continue;
+
+    const formattedFullDate = (eventDate.getMonth() + 1) + '-' + eventDate.getDate() + '-' + eventDate.getFullYear();
+    const formattedShortDate = (eventDate.getMonth() + 1) + '-' + eventDate.getDate();
+
+    const key = buildAttendanceKey_(personalId, lastNameRaw, firstNameRaw);
+
+    attendanceRecords.push({
+      personalId: personalId,
+      lastName: lastNameRaw,
+      firstName: firstNameRaw,
+      key: key,
+      eventName: eventName.toString().trim(),
+      eventDate: eventDate,
+      formattedFullDate: formattedFullDate,
+      formattedShortDate: formattedShortDate,
+      type: row[logTypeIndex],
+      notes: row[logNotesColIndex],
+      extra: row[logExtraColIndex],
+      originalLogRownum: i + 2
+    });
   }
-  // --- END REFINEMENT ---
-  
+
   if (attendanceRecords.length === 0) {
     Logger.log('No *new* valid attendance records found in the log.');
     return;
   }
 
-  Logger.log(`Processing ${attendanceRecords.length} new records.`);
-
-  // 2. Prepare caches to hold sheet data
+  // 2) Prepare caches to hold sheet data
   const sunServiceSheet = ss.getSheetByName(sunServiceSheetName);
   const eventSheet = ss.getSheetByName(eventSheetName);
   const pastoralSheet = ss.getSheetByName(pastoralSheetName);
 
-  let sunServiceData, eventSheetData, pastoralData;
+  let sunServiceData = null;
+  let eventSheetData = null;
+  let pastoralData = null;
 
-  // Prepare 'Sunday Service' sheet data
   if (sunServiceSheet) {
-    sunServiceData = prepareSheetData(
-      sunServiceSheet,  
-      sunServiceDataStartRow,  
-      sunServiceDataStartCol,  
-      nameColumnLetter,
-      [sunServiceDateRow],  
-      false,  
-      false  
+    sunServiceData = prepareSheetDataWithPersonalId_(
+      sunServiceSheet,
+      sunServiceDataStartRow,
+      sunServiceDataStartCol,
+      [sunServiceDateRow],
+      false,
+      false
     );
   } else {
-    Logger.log(`Warning: "${sunServiceSheetName}" not found. Skipping.`);
+    Logger.log('Warning: "' + sunServiceSheetName + '" not found. Skipping.');
   }
 
-  // Prepare 'Event Attendance' sheet data
   if (eventSheet) {
-    eventSheetData = prepareSheetData(
-      eventSheet,  
-      eventDataStartRow,  
-      eventDataStartCol,  
-      nameColumnLetter,
-      [eventDateRow, eventNameRow],  
-      true,  
-      true  
+    eventSheetData = prepareSheetDataWithPersonalId_(
+      eventSheet,
+      eventDataStartRow,
+      eventDataStartCol,
+      [eventDateRow, eventNameRow],
+      true,
+      true
     );
   } else {
-    Logger.log(`Warning: "${eventSheetName}" not found. Skipping.`);
+    Logger.log('Warning: "' + eventSheetName + '" not found. Skipping.');
   }
 
-  // Prepare 'Pastoral Check-In' sheet data
   if (pastoralSheet) {
-    pastoralData = preparePastoralSheetData(pastoralSheet, pastoralDataStartRow);
+    pastoralData = preparePastoralSheetDataWithPersonalId_(pastoralSheet, pastoralDataStartRow);
   } else {
-    Logger.log(`Warning: "${pastoralSheetName}" not found. Skipping.`);
+    Logger.log('Warning: "' + pastoralSheetName + '" not found. Skipping.');
   }
 
-  // 3. Process all *new* records in memory
+  // 3) Process records in memory
   let recordsWereLogged = false;
-  
-  // --- This set tracks unique name/date pairs to prevent duplicates ---
   const processedLogs = new Set();
 
   for (const record of attendanceRecords) {
-    const { name, eventName, eventDate, formattedFullDate, formattedShortDate, notes, extra } = record;
     const logDataIndex = record.originalLogRownum - 2;
 
-    // --- Check for duplicates IN THE LOG FILE ---
-    const logKey = `${name}|${eventName}|${formattedFullDate}`;
+    const logKey = record.key + '|' + record.eventName + '|' + record.formattedFullDate;
     if (processedLogs.has(logKey)) {
-        logData[logDataIndex][logStatusColIndex] = 'Logged';
-        logData[logDataIndex][logRemarksColIndex] = 'Duplicate log entry processed.';
-        recordsWereLogged = true;
-        continue;
+      logData[logDataIndex][logStatusColIndex] = 'Logged';
+      logData[logDataIndex][logRemarksColIndex] = 'Duplicate log entry processed.';
+      recordsWereLogged = true;
+      continue;
     }
 
     try {
-      // --- REFINED: Make "Sunday Service" check case-insensitive ---
+      const eventName = record.eventName;
+
       if (/sunday service/i.test(eventName)) {
-        // --- CASE 1: Sunday Service ---
         if (!sunServiceData) continue;
-        
-        let row = sunServiceData.nameMap.get(name);
-        const col = sunServiceData.dateMap.get(formattedShortDate);
-        
-        if (row && col) {
-          const arrayRow = row - sunServiceDataStartRow;  
-          const arrayCol = col - sunServiceDataStartCol;
+
+        const rowNum = sunServiceData.keyMap.get(record.key) || null;
+        const colNum = sunServiceData.dateMap.get(record.formattedShortDate) || null;
+
+        if (rowNum && colNum) {
+          const arrayRow = rowNum - sunServiceDataStartRow;
+          const arrayCol = colNum - sunServiceDataStartCol;
+
           if (sunServiceData.checkboxes[arrayRow] && sunServiceData.checkboxes[arrayRow][arrayCol] !== undefined) {
             sunServiceData.checkboxes[arrayRow][arrayCol] = true;
             logData[logDataIndex][logStatusColIndex] = 'Logged';
@@ -224,80 +212,69 @@ function processAttendanceLogV2() {
             recordsWereLogged = true;
             processedLogs.add(logKey);
           }
-        } else if (!row) {
-          const guestLogEntry = logData[logDataIndex];
-          const lastName = guestLogEntry[logLastNameIndex];
-          const firstName = guestLogEntry[logFirstNameIndex];
-
-          const capitalizedLastName = capitalizeName(lastName);
-          const capitalizedFirstName = capitalizeName(firstName);
-          
+        } else if (!rowNum) {
+          // Add new row
           const nextRow = sunServiceData.nextBlankRow;
-          
-          sunServiceSheet.getRange(nextRow, 3).setValue(capitalizedLastName); // Col C
-          sunServiceSheet.getRange(nextRow, 4).setValue(capitalizedFirstName); // Col D
-          
-          SpreadsheetApp.flush(); 
-          
-          sunServiceData.nameMap.set(name, nextRow);
-          
+
+          // Column B = Personal ID, Column C = Last, Column D = First
+          if (record.personalId) sunServiceSheet.getRange(nextRow, 2).setValue(record.personalId);
+          if (record.lastName) sunServiceSheet.getRange(nextRow, 3).setValue(capitalizeName(record.lastName));
+          if (record.firstName) sunServiceSheet.getRange(nextRow, 4).setValue(capitalizeName(record.firstName));
+
+          SpreadsheetApp.flush();
+
+          sunServiceData.keyMap.set(record.key, nextRow);
+
           const numCols = sunServiceData.checkboxes[0] ? sunServiceData.checkboxes[0].length : 0;
           const newCheckboxRow = Array(numCols).fill(false);
 
-          if (col) {
-            const arrayCol = col - sunServiceDataStartCol;
-            newCheckboxRow[arrayCol] = true;  
+          if (colNum) {
+            const arrayCol = colNum - sunServiceDataStartCol;
+            newCheckboxRow[arrayCol] = true;
             logData[logDataIndex][logStatusColIndex] = 'Logged';
-            logData[logDataIndex][logRemarksColIndex] = 'New person added to directory.';
+            logData[logDataIndex][logRemarksColIndex] = 'New person added.';
             processedLogs.add(logKey);
           } else {
             logData[logDataIndex][logRemarksColIndex] = 'New person added, but event date not found.';
           }
-          
+
           sunServiceData.checkboxes.push(newCheckboxRow);
           sunServiceData.numRows++;
           sunServiceData.nextBlankRow++;
           recordsWereLogged = true;
-
-        } else if (row && !col) {
-          logData[logDataIndex][logStatusColIndex] = '';
+        } else if (rowNum && !colNum) {
           logData[logDataIndex][logRemarksColIndex] = 'Date not found in Sunday Service sheet.';
           recordsWereLogged = true;
         }
 
       } else if (/pastoral check-?in/i.test(eventName)) {
-        // --- CASE 2: Pastoral Check-In ---
         if (!pastoralData) continue;
 
-        let row = pastoralData.nameMap.get(name);
+        const rowNum = pastoralData.keyMap.get(record.key) || null;
 
-        if (row) {
-          const recentCell = pastoralSheet.getRange(row, pastoralRecentDateCol); // E
-          const prevCell = pastoralSheet.getRange(row, pastoralPreviousDateCol); // F
+        if (rowNum) {
+          const recentCell = pastoralSheet.getRange(rowNum, pastoralRecentDateCol);
+          const prevCell = pastoralSheet.getRange(rowNum, pastoralPreviousDateCol);
           const existingRecent = recentCell.getValue();
 
-          // shift recent → previous
           if (existingRecent) {
             prevCell.setValue(existingRecent);
-            prevCell.setHorizontalAlignment("center");   // center align
-            prevCell.setVerticalAlignment("middle");
+            prevCell.setHorizontalAlignment('center');
+            prevCell.setVerticalAlignment('middle');
           }
 
-          // write new recent check-in
-          recentCell.setValue(eventDate);
-          recentCell.setHorizontalAlignment("center");   // center align
-          recentCell.setVerticalAlignment("middle");
+          recentCell.setValue(record.eventDate);
+          recentCell.setHorizontalAlignment('center');
+          recentCell.setVerticalAlignment('middle');
 
-          // write notes (always replace, even if blank)
-          const notesCell = pastoralSheet.getRange(row, pastoralNotesCol); // G
-          notesCell.setValue(notes);
-          notesCell.setHorizontalAlignment("left");    // left align
-          notesCell.setVerticalAlignment("middle");
+          const notesCell = pastoralSheet.getRange(rowNum, pastoralNotesCol);
+          notesCell.setValue(record.notes);
+          notesCell.setHorizontalAlignment('left');
+          notesCell.setVerticalAlignment('middle');
 
-          // write extra from Col L into Col H (pastor, always replace)
-          const extraCell = pastoralSheet.getRange(row, pastoralExtraCol); // H
-          extraCell.setValue(extra);
-          extraCell.setHorizontalAlignment("left");    // LEFT ALIGN
+          const extraCell = pastoralSheet.getRange(rowNum, pastoralExtraCol);
+          extraCell.setValue(record.extra);
+          extraCell.setHorizontalAlignment('left');
 
           logData[logDataIndex][logStatusColIndex] = 'Logged';
           logData[logDataIndex][logRemarksColIndex] = '';
@@ -305,72 +282,55 @@ function processAttendanceLogV2() {
           processedLogs.add(logKey);
 
         } else {
-          // --- New Person ---
-          const guestLogEntry = logData[logDataIndex];
-          const lastName = guestLogEntry[logLastNameIndex];
-          const firstName = guestLogEntry[logFirstNameIndex];
-
-          const capitalizedLastName = capitalizeName(lastName);
-          const capitalizedFirstName = capitalizeName(firstName);
-
+          // Add new row
           const nextRow = pastoralData.nextBlankRow;
 
-          pastoralSheet.getRange(nextRow, 3).setValue(capitalizedLastName);  // C
-          pastoralSheet.getRange(nextRow, 4).setValue(capitalizedFirstName); // D
+          if (record.personalId) pastoralSheet.getRange(nextRow, 2).setValue(record.personalId); // B
+          if (record.lastName) pastoralSheet.getRange(nextRow, 3).setValue(capitalizeName(record.lastName)); // C
+          if (record.firstName) pastoralSheet.getRange(nextRow, 4).setValue(capitalizeName(record.firstName)); // D
 
-          // Insert recent date in E
           const recentCell = pastoralSheet.getRange(nextRow, pastoralRecentDateCol);
-          recentCell.setValue(eventDate);
-          recentCell.setHorizontalAlignment("center");
-          recentCell.setVerticalAlignment("middle");
+          recentCell.setValue(record.eventDate);
+          recentCell.setHorizontalAlignment('center');
+          recentCell.setVerticalAlignment('middle');
 
-          // Insert notes in G (always set, even if blank)
           const notesCell = pastoralSheet.getRange(nextRow, pastoralNotesCol);
-          notesCell.setValue(notes);
-          notesCell.setHorizontalAlignment("left");
-          notesCell.setVerticalAlignment("middle");
+          notesCell.setValue(record.notes);
+          notesCell.setHorizontalAlignment('left');
+          notesCell.setVerticalAlignment('middle');
 
-          // Insert extra in H (pastor, always set)
           const extraCell = pastoralSheet.getRange(nextRow, pastoralExtraCol);
-          extraCell.setValue(extra);
-          extraCell.setHorizontalAlignment("left");    // LEFT ALIGN
+          extraCell.setValue(record.extra);
+          extraCell.setHorizontalAlignment('left');
 
           SpreadsheetApp.flush();
 
-          pastoralData.nameMap.set(name, nextRow);
+          pastoralData.keyMap.set(record.key, nextRow);
           pastoralData.nextBlankRow++;
           pastoralData.numRows++;
 
           logData[logDataIndex][logStatusColIndex] = 'Logged';
-          logData[logDataIndex][logRemarksColIndex] = 'New person added to directory.';
+          logData[logDataIndex][logRemarksColIndex] = 'New person added.';
           recordsWereLogged = true;
           processedLogs.add(logKey);
         }
 
       } else {
-
-        // --- CASE 3: Other Events (to 'Event Attendance' sheet) ---
+        // Other events -> Event Attendance
         if (!eventSheetData) continue;
 
-        const eventKey = `${formattedFullDate}_${eventName.trim().toLowerCase()}`;
-        let col = eventSheetData.dateMap.get(eventKey);
+        const eventKey = record.formattedFullDate + '_' + record.eventName.trim().toLowerCase();
+        let colNum = eventSheetData.dateMap.get(eventKey) || null;
 
-        if (!col) {
-          // === NEW LOGIC FOR FINDING AVAILABLE EVENT COLUMN ===
-          // 1) Try to find the first column where:
-          //    - Row 3 has "Post event name here"
-          //    - Row 2 is blank (no date)
+        if (!colNum) {
+          // Find a placeholder col or append a new one
           const lastCol = eventSheet.getLastColumn();
           let placeholderCol = null;
 
           if (lastCol >= eventDataStartCol) {
             const width = lastCol - eventDataStartCol + 1;
-            const nameRowValues = eventSheet
-              .getRange(eventNameRow, eventDataStartCol, 1, width)
-              .getValues()[0];
-            const dateRowValues = eventSheet
-              .getRange(eventDateRow, eventDataStartCol, 1, width)
-              .getValues()[0];
+            const nameRowValues = eventSheet.getRange(eventNameRow, eventDataStartCol, 1, width).getValues()[0];
+            const dateRowValues = eventSheet.getRange(eventDateRow, eventDataStartCol, 1, width).getValues()[0];
 
             for (let i = 0; i < width; i++) {
               const nameCell = nameRowValues[i];
@@ -382,47 +342,37 @@ function processAttendanceLogV2() {
             }
           }
 
-          if (placeholderCol !== null) {
-            // Use the available placeholder column
-            col = placeholderCol;
-          } else {
-            // No more "Post event name here" with blank date → fallback to append new column
-            col = eventSheetData.lastDataCol + 1;
-          }
+          colNum = (placeholderCol !== null) ? placeholderCol : (eventSheetData.lastDataCol + 1);
 
-          // Now write the date, event name, and count formula into the chosen column
-          eventSheet.getRange(eventDateRow, col).setValue(eventDate);
-          eventSheet.getRange(eventNameRow, col).setValue(eventName);
+          eventSheet.getRange(eventDateRow, colNum).setValue(record.eventDate);
+          eventSheet.getRange(eventNameRow, colNum).setValue(record.eventName);
 
-          const colLetter = eventSheet.getRange(1, col).getA1Notation().replace(/\d+/g, '');
-          const formula = `=COUNTIF(${colLetter}${eventDataStartRow}:${colLetter}, TRUE)`;
-          eventSheet.getRange(eventCountRow, col).setFormula(formula);
+          const colLetter = eventSheet.getRange(1, colNum).getA1Notation().replace(/\d+/g, '');
+          const formula = '=COUNTIF(' + colLetter + eventDataStartRow + ':' + colLetter + ', TRUE)';
+          eventSheet.getRange(eventCountRow, colNum).setFormula(formula);
 
           if (eventSheetData.numRows > 0) {
-            const newCheckboxRange = eventSheet.getRange(eventDataStartRow, col, eventSheetData.numRows, 1);
-            newCheckboxRange.insertCheckboxes();
+            eventSheet.getRange(eventDataStartRow, colNum, eventSheetData.numRows, 1).insertCheckboxes();
           }
 
           SpreadsheetApp.flush();
 
-          eventSheetData.dateMap.set(eventKey, col);
+          eventSheetData.dateMap.set(eventKey, colNum);
 
-          // Only extend the in-memory checkbox array if we actually added a NEW column
           if (placeholderCol === null) {
-            eventSheetData.lastDataCol = col;
-            eventSheetData.checkboxes.forEach(r => r.push(false));
-          } else if (col > eventSheetData.lastDataCol) {
-            eventSheetData.lastDataCol = col;
+            eventSheetData.lastDataCol = colNum;
+            eventSheetData.checkboxes.forEach(function (r) { r.push(false); });
+          } else if (colNum > eventSheetData.lastDataCol) {
+            eventSheetData.lastDataCol = colNum;
           }
-
-          Logger.log(`Added/used column ${col} for ${eventName} on ${formattedFullDate} in sheet "${eventSheetName}".`);
         }
 
-        let row = eventSheetData.nameMap.get(name);
+        const rowNum = eventSheetData.keyMap.get(record.key) || null;
 
-        if (row) {
-          const arrayRow = row - eventDataStartRow;  
-          const arrayCol = col - eventDataStartCol;
+        if (rowNum) {
+          const arrayRow = rowNum - eventDataStartRow;
+          const arrayCol = colNum - eventDataStartCol;
+
           if (eventSheetData.checkboxes[arrayRow] && eventSheetData.checkboxes[arrayRow][arrayCol] !== undefined) {
             eventSheetData.checkboxes[arrayRow][arrayCol] = true;
             logData[logDataIndex][logStatusColIndex] = 'Logged';
@@ -431,130 +381,142 @@ function processAttendanceLogV2() {
             processedLogs.add(logKey);
           }
         } else {
-          const guestLogEntry = logData[logDataIndex];
-          const lastName = guestLogEntry[logLastNameIndex];
-          const firstName = guestLogEntry[logFirstNameIndex];
-          const type = guestLogEntry[logTypeIndex];
-          
-          const capitalizedLastName = capitalizeName(lastName);
-          const capitalizedFirstName = capitalizeName(firstName);
-          
+          // Add new row
           const nextRow = eventSheetData.nextBlankRow;
-          
-          eventSheet.getRange(nextRow, 3).setValue(capitalizedLastName); // Col C
-          eventSheet.getRange(nextRow, 4).setValue(capitalizedFirstName); // Col D
-          eventSheet.getRange(nextRow, typeColumnIndex).setValue(type); // Col F
-          
-          SpreadsheetApp.flush(); 
 
-          eventSheetData.nameMap.set(name, nextRow);
-          
+          if (record.personalId) eventSheet.getRange(nextRow, 2).setValue(record.personalId); // B
+          if (record.lastName) eventSheet.getRange(nextRow, 3).setValue(capitalizeName(record.lastName)); // C
+          if (record.firstName) eventSheet.getRange(nextRow, 4).setValue(capitalizeName(record.firstName)); // D
+          eventSheet.getRange(nextRow, typeColumnIndex).setValue(record.type); // F
+
+          SpreadsheetApp.flush();
+
+          eventSheetData.keyMap.set(record.key, nextRow);
+
           const numCols = eventSheetData.checkboxes[0] ? eventSheetData.checkboxes[0].length : 0;
           const newCheckboxRow = Array(numCols).fill(false);
-          
-          const arrayCol = col - eventDataStartCol;
-          newCheckboxRow[arrayCol] = true;  
-          
+
+          const arrayCol = colNum - eventDataStartCol;
+          if (arrayCol >= 0 && arrayCol < newCheckboxRow.length) newCheckboxRow[arrayCol] = true;
+
           eventSheetData.checkboxes.push(newCheckboxRow);
           eventSheetData.numRows++;
           eventSheetData.nextBlankRow++;
-          
+
           logData[logDataIndex][logStatusColIndex] = 'Logged';
-          logData[logDataIndex][logRemarksColIndex] = 'New person added to directory.';
+          logData[logDataIndex][logRemarksColIndex] = 'New person added.';
           recordsWereLogged = true;
           processedLogs.add(logKey);
         }
       }
+
     } catch (e) {
-      Logger.log(`Error processing record for ${name} at ${eventName}: ${e.message} ${e.stack}`);
+      Logger.log('Error processing record at log row ' + record.originalLogRownum + ': ' + e.message);
     }
   }
 
-  // 4. Write all updates to the sheets
-  // Write to Sunday Service
+  // 4) Write updates back
   if (sunServiceData && sunServiceData.checkboxes.length > 0 && sunServiceData.checkboxes[0].length > 0) {
-    const finalSunRange = sunServiceSheet.getRange(
+    sunServiceSheet.getRange(
       sunServiceDataStartRow,
       sunServiceDataStartCol,
       sunServiceData.checkboxes.length,
       sunServiceData.checkboxes[0].length
-    );
-    finalSunRange.setValues(sunServiceData.checkboxes);
-    
-    SpreadsheetApp.flush();
-    Logger.log(`Successfully updated "${sunServiceSheetName}".`);
+    ).setValues(sunServiceData.checkboxes);
   }
 
-  // Write to Event Attendance
   if (eventSheetData && eventSheetData.checkboxes.length > 0 && eventSheetData.checkboxes[0].length > 0) {
-    const finalRange = eventSheet.getRange(
-      eventDataStartRow,  
-      eventDataStartCol,  
+    eventSheet.getRange(
+      eventDataStartRow,
+      eventDataStartCol,
       eventSheetData.checkboxes.length,
       eventSheetData.checkboxes[0].length
-    );
-    finalRange.setValues(eventSheetData.checkboxes);
-    
-    SpreadsheetApp.flush();
-    Logger.log(`Successfully updated "${eventSheetName}".`);
+    ).setValues(eventSheetData.checkboxes);
   }
 
-  // --- REFINEMENT: Write back "Logged" status to 'Attendance Log' ---
   if (recordsWereLogged) {
-    const statusData = logData.map(row => [row[logStatusColIndex], row[logRemarksColIndex]]);
+    // Write back only Status (Col I) and Remarks (Col J)
+    const statusData = logData.map(function (r) { return [r[logStatusColIndex], r[logRemarksColIndex]]; });
     logSheet.getRange(2, logStatusColumn, statusData.length, 2).setValues(statusData);
-    Logger.log('Updated "Logged" and "Guest" status in Attendance Log.');
   }
-  // --- END REFINEMENT ---
 
   Logger.log('Attendance processing complete.');
 }
 
 /**
- * Helper function to read a sheet's layout and existing checkbox values.
- * FINDS THE *ACTUAL* LAST ROW with data in the name column.
+ * Builds the matching key used across Attendance Log and destination tabs.
+ * Key = PersonalID|Last|First (normalized)
+ *
+ * NOTE:
+ * - Allows missing first OR last name (per your note)
+ * - Personal ID is the primary anchor
  */
-function prepareSheetData(sheet, dataStartRow, dataStartCol, nameColumnLetter, dateKeyRows, useFullDate, isEventSheet) {
-  
-  // --- REFINED: Find last row based on data in Col C or Col D ---
-  const nameValuesAll = sheet.getRange(`C1:D${sheet.getMaxRows()}`).getValues();
+function buildAttendanceKey_(personalId, lastName, firstName) {
+  const pid = (personalId || '').toString().trim();
+  const ln = normalizeKeyPart_(lastName);
+  const fn = normalizeKeyPart_(firstName);
+
+  // If PID is blank, we still return a weaker key so the script can fall back to "add new row" behavior.
+  return pid + '|' + ln + '|' + fn;
+}
+
+/**
+ * Normalizes a key part (keeps letters+digits, strips spaces/punct).
+ */
+function normalizeKeyPart_(v) {
+  return (v || '')
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u00C0-\u024F]/g, '');
+}
+
+/**
+ * Reads destination sheet and builds:
+ * - keyMap: key -> row number (ONLY for rows that have Personal ID in Column B)
+ * - dateMap: date/event -> column
+ * - checkboxes: grid values
+ * - nextBlankRow: first truly empty row (based on B/C/D)
+ */
+function prepareSheetDataWithPersonalId_(sheet, dataStartRow, dataStartCol, dateKeyRows, useFullDate, isEventSheet) {
+  // Find last row based on any data in B/C/D
+  const bcdAll = sheet.getRange('B1:D' + sheet.getMaxRows()).getValues();
   let actualLastDataRow = 0;
-  for (let i = nameValuesAll.length - 1; i >= 0; i--) {
-    const lastName = nameValuesAll[i][0]; // Col C
-    const firstName = nameValuesAll[i][1]; // Col D
-    if (lastName || firstName) {
+  for (let i = bcdAll.length - 1; i >= 0; i--) {
+    const pid = bcdAll[i][0];
+    const ln = bcdAll[i][1];
+    const fn = bcdAll[i][2];
+    if (pid || ln || fn) {
       actualLastDataRow = i + 1;
       break;
     }
   }
-  
+
   const nextBlankRow = actualLastDataRow < dataStartRow ? dataStartRow : actualLastDataRow + 1;
   const dataRowCount = actualLastDataRow >= dataStartRow ? (actualLastDataRow - dataStartRow + 1) : 0;
 
-  // --- REFINED: Build Name-to-Row Map from Columns C and D ---
-  const nameMap = new Map();
+  // Build keyMap ONLY for rows with Personal ID in Col B
+  const keyMap = new Map();
   if (dataRowCount > 0) {
-    const namesData = nameValuesAll.slice(dataStartRow - 1, actualLastDataRow);
-    
-    for (let i = 0; i < namesData.length; i++) {
-      const lastName = namesData[i][0];
-      const firstName = namesData[i][1];
-      
-      if (lastName || firstName) {
-        const name = standardizeNameHelper(`${lastName}, ${firstName}`);
-        if (name && !nameMap.has(name)) {
-          nameMap.set(name, i + dataStartRow);
-        }
+    const slice = bcdAll.slice(dataStartRow - 1, actualLastDataRow);
+    for (let i = 0; i < slice.length; i++) {
+      const pid = (slice[i][0] || '').toString().trim(); // Col B
+      const ln = (slice[i][1] || '').toString().trim();  // Col C
+      const fn = (slice[i][2] || '').toString().trim();  // Col D
+
+      if (!pid) continue; // IMPORTANT: no Personal ID -> do NOT use for matching
+
+      const key = buildAttendanceKey_(pid, ln, fn);
+      if (key && !keyMap.has(key)) {
+        keyMap.set(key, i + dataStartRow);
       }
     }
-  } else {
-     Logger.log(`Sheet "${sheet.getName()}" has no names in columns C or D starting at row ${dataStartRow}.`);
   }
 
-  // 2. Build Date-to-Column Map
+  // Build Date-to-Column Map
   const dateMap = new Map();
   const lastSheetCol = sheet.getLastColumn() || dataStartCol;
-  
+
   const dateValues = sheet.getRange(dateKeyRows[0], 1, 1, lastSheetCol).getValues()[0];
   const nameValues = dateKeyRows[1] ? sheet.getRange(dateKeyRows[1], 1, 1, lastSheetCol).getValues()[0] : null;
 
@@ -562,71 +524,68 @@ function prepareSheetData(sheet, dataStartRow, dataStartCol, nameColumnLetter, d
 
   for (let i = dataStartCol - 1; i < lastSheetCol; i++) {
     const dateVal = dateValues[i];
-    
+
     if (dateVal instanceof Date) {
       const formattedDate = useFullDate
-        ? `${dateVal.getMonth() + 1}-${dateVal.getDate()}-${dateVal.getFullYear()}`
-        : `${dateVal.getMonth() + 1}-${dateVal.getDate()}`;
-        
+        ? (dateVal.getMonth() + 1) + '-' + dateVal.getDate() + '-' + dateVal.getFullYear()
+        : (dateVal.getMonth() + 1) + '-' + dateVal.getDate();
+
       let key;
       if (nameValues) {
         const eventName = nameValues[i] ? nameValues[i].toString().trim().toLowerCase() : '';
-        key = `${formattedDate}_${eventName}`;
+        key = formattedDate + '_' + eventName;
       } else {
         key = formattedDate;
       }
-      
-      dateMap.set(key, i + 1);  
+
+      dateMap.set(key, i + 1);
       lastDataCol = i + 1;
 
     } else if (dateVal === '' && (!nameValues || nameValues[i] === '')) {
       break;
-    } else if (i >= dataStartCol -1) {
+    } else if (i >= dataStartCol - 1) {
       lastDataCol = i + 1;
     }
   }
 
-  // 3. Get all existing checkbox values
+  // Get checkbox values
   const numCols = lastDataCol >= dataStartCol ? (lastDataCol - dataStartCol + 1) : 0;
   let checkboxes = [];
-  let range;  
 
   if (dataRowCount > 0) {
     if (numCols > 0) {
-      range = sheet.getRange(dataStartRow, dataStartCol, dataRowCount, numCols);
+      const range = sheet.getRange(dataStartRow, dataStartCol, dataRowCount, numCols);
       checkboxes = range.getValues();
-      if (isEventSheet) {
-        range.insertCheckboxes();
-      }
+      if (isEventSheet) range.insertCheckboxes();
     } else {
-      range = sheet.getRange(dataStartRow, dataStartCol, dataRowCount, 1);  
-      checkboxes = Array(dataRowCount).fill(0).map(() => []);
+      checkboxes = Array(dataRowCount).fill(0).map(function () { return []; });
     }
   }
 
   return {
     sheet: sheet,
-    nameMap: nameMap,
+    keyMap: keyMap,
     dateMap: dateMap,
     checkboxes: checkboxes,
-    lastDataCol: lastDataCol,  
+    lastDataCol: lastDataCol,
     numRows: dataRowCount,
     nextBlankRow: nextBlankRow
   };
 }
 
 /**
- * Helper function for Pastoral Check-In sheet.
- * Builds nameMap and nextBlankRow only.
+ * Pastoral Check-In helper:
+ * builds keyMap + nextBlankRow based on B/C/D,
+ * but ONLY maps rows that have Personal ID in Col B.
  */
-function preparePastoralSheetData(sheet, dataStartRow) {
-  
-  const nameValuesAll = sheet.getRange(`C1:D${sheet.getMaxRows()}`).getValues();
+function preparePastoralSheetDataWithPersonalId_(sheet, dataStartRow) {
+  const bcdAll = sheet.getRange('B1:D' + sheet.getMaxRows()).getValues();
   let actualLastDataRow = 0;
-  for (let i = nameValuesAll.length - 1; i >= 0; i--) {
-    const lastName = nameValuesAll[i][0];
-    const firstName = nameValuesAll[i][1];
-    if (lastName || firstName) {
+  for (let i = bcdAll.length - 1; i >= 0; i--) {
+    const pid = bcdAll[i][0];
+    const ln = bcdAll[i][1];
+    const fn = bcdAll[i][2];
+    if (pid || ln || fn) {
       actualLastDataRow = i + 1;
       break;
     }
@@ -635,77 +594,45 @@ function preparePastoralSheetData(sheet, dataStartRow) {
   const nextBlankRow = actualLastDataRow < dataStartRow ? dataStartRow : actualLastDataRow + 1;
   const dataRowCount = actualLastDataRow >= dataStartRow ? (actualLastDataRow - dataStartRow + 1) : 0;
 
-  const nameMap = new Map();
+  const keyMap = new Map();
   if (dataRowCount > 0) {
-    const namesData = nameValuesAll.slice(dataStartRow - 1, actualLastDataRow);
-    for (let i = 0; i < namesData.length; i++) {
-      const lastName = namesData[i][0];
-      const firstName = namesData[i][1];
-      if (lastName || firstName) {
-        const name = standardizeNameHelper(`${lastName}, ${firstName}`);
-        if (name && !nameMap.has(name)) {
-          nameMap.set(name, i + dataStartRow);
-        }
+    const slice = bcdAll.slice(dataStartRow - 1, actualLastDataRow);
+    for (let i = 0; i < slice.length; i++) {
+      const pid = (slice[i][0] || '').toString().trim();
+      const ln = (slice[i][1] || '').toString().trim();
+      const fn = (slice[i][2] || '').toString().trim();
+
+      if (!pid) continue; // IMPORTANT: no Personal ID -> do NOT use for matching
+
+      const key = buildAttendanceKey_(pid, ln, fn);
+      if (key && !keyMap.has(key)) {
+        keyMap.set(key, i + dataStartRow);
       }
     }
   }
 
   return {
     sheet: sheet,
-    nameMap: nameMap,
+    keyMap: keyMap,
     numRows: dataRowCount,
     nextBlankRow: nextBlankRow
   };
 }
 
 /**
- * Standardizes a name into 'lastname,firstname' format (no spaces).
- * REFINED: This is the new, consistent, and smarter version.
- */
-function standardizeNameHelper(nameStr) {
-  if (!nameStr) return '';
-  
-  // 1. Clean junk (like (Guest), (Deacon), etc.), lowercase
-  let name = nameStr.toString().trim().toLowerCase().replace(/[^a-z,\s]/g, "");
-
-  let lastName = '';
-  let firstName = '';
-
-  if (name.includes(',')) {
-    const parts = name.split(',');
-    lastName = parts[0] ? parts[0].trim() : '';
-    firstName = parts[1] ? parts[1].trim() : '';
-  } else {
-    const parts = name.split(/\s+/).filter(Boolean);
-    if (parts.length === 0) return '';
-    if (parts.length === 1) {
-      firstName = parts[0] ? parts[0].trim() : '';
-    } else {
-      firstName = parts.slice(0, parts.length - 1).join(' ');
-      lastName = parts[parts.length - 1].trim();
-    }
-  }
-  
-  lastName = lastName.replace(/\s+/g, '');
-  firstName = firstName.replace(/\s+/g, '');
-
-  return `${lastName},${firstName}`;
-}
-
-/**
-* Capitalizes the first letter of each part of a name (e.g., "john doe" -> "John Doe").
- * Handles hyphenated names (e.g., "arai-joseph" -> "Arai-Joseph").
+ * Capitalizes the first letter of each part of a name.
  */
 function capitalizeName(nameStr) {
   if (!nameStr) return '';
-  
   return nameStr.toLowerCase()
-    .replace(/\b(\w)|(-(\w))/g, (match, p1, p2, p3) => {
+    .replace(/\b(\w)|(-(\w))/g, function (match, p1, p2, p3) {
       if (p1) return p1.toUpperCase();
       if (p3) return '-' + p3.toUpperCase();
       return match;
     });
 }
+
+
 
 /**
  * Reverse of processAttendanceLogV2:
