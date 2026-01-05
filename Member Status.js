@@ -3,22 +3,37 @@
  *
  * This script updates the membership status and personal details on 'Sunday Service'
  * and 'Event Attendance' sheets by cross-referencing with a central 'Directory' spreadsheet.
+ *
+ * UPDATE (as requested):
+ * - Matching now prioritizes: Personal ID (Column B) + Last Name (Col C) + First Name (Col D)
+ * - If Personal ID is missing, it falls back to name-only matching (same behavior as before).
+ * - Also updates these tabs:
+ *   - Appsheet SunServ
+ *   - Appsheet Event
+ *   - Appsheet Pastoral
+ *   For AppSheet tabs:
+ *     - Last Name = Column B
+ *     - First Name = Column C
+ *     - Gender = Column D
+ *     - Lineage = Column E
+ *     - Age = Column F
+ *     - Type = Column G
  */
 
 /**
  * Main function to be run manually.
  * It reads the Directory spreadsheet, builds a map of members,
- * and then processes both 'Sunday Service' and 'Event Attendance' sheets.
+ * and then processes 'Sunday Service', 'Event Attendance', 'Attendance Log', and AppSheet tabs.
  */
 function processMemberStatus() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const configSheet = ss.getSheetByName('Config');
-  
+
   if (!configSheet) {
     Logger.log("Error: 'Config' sheet not found. Please create one with the Directory link in cell B2.");
     return;
   }
-  
+
   // Get the URL or ID of the Directory Spreadsheet from Config!B2
   const directoryUrl = configSheet.getRange('B2').getValue();
   if (!directoryUrl) {
@@ -26,36 +41,57 @@ function processMemberStatus() {
     return;
   }
 
-  // Build the fast lookup map from the Directory
-  const directoryMap = buildDirectoryMap(directoryUrl);
-  if (!directoryMap) {
-    // Error is already logged in the buildDirectoryMap function
+  // Build the fast lookup maps from the Directory
+  const directoryLookup = buildDirectoryMap(directoryUrl);
+  if (!directoryLookup) {
     Logger.log('Failed to build directory map. Aborting.');
     return;
   }
 
-  Logger.log(`Directory map built successfully with ${Object.keys(directoryMap).length} entries.`);
+  Logger.log(
+    `Directory maps built successfully. byPidName=${directoryLookup.byPidName.size}, byName=${directoryLookup.byName.size}`
+  );
 
   // Process the 'Sunday Service' sheet, starting from row 4
-  processSheet(ss, 'Sunday Service', 4, directoryMap);
-  
+  processSheet(ss, 'Sunday Service', 4, directoryLookup);
+
   // Process the 'Event Attendance' sheet, starting from row 5
-  processSheet(ss, 'Event Attendance', 5, directoryMap);
-  
+  processSheet(ss, 'Event Attendance', 5, directoryLookup);
+
+  // Process the 'Attendance Log' sheet, starting from row 4
+  // Column B = Personal ID, Column C = Last Name, Column D = First Name, Column E = Member/Guest
+  processAttendanceLog(ss, 'Attendance Log', 4, directoryLookup);
+
+  // AppSheet tabs (layout per your note)
+  // Last = B, First = C, Gender = D, Lineage = E, Age = F, Type = G
+  processAppSheetTab(ss, 'Appsheet SunServ', 2, directoryLookup);
+  processAppSheetTab(ss, 'Appsheet Event', 2, directoryLookup);
+  processAppSheetTab(ss, 'Appsheet Pastoral', 2, directoryLookup);
+
   Logger.log('Processing complete for all sheets.');
-  SpreadsheetApp.flush(); // Ensure all changes are saved
+  SpreadsheetApp.flush();
 }
 
 /**
- * Creates a lookup map from the Directory spreadsheet.
+ * Creates lookup maps from the Directory spreadsheet.
+ * - byPidName: PID + normalized Last + normalized First
+ * - byName: normalized Last + normalized First (fallback)
+ *
+ * Directory assumed columns:
+ *   Z = Personal ID
+ *   C = Last Name
+ *   D = First Name
+ *   E = Gender
+ *   F = Lineage
+ *   H = Age
+ *
  * @param {string} directoryUrl The URL or ID of the Directory spreadsheet.
- * @return {Object|null} A map where keys are normalized names and
- * values are objects with {gender, lineage, age}, or null on failure.
+ * @return {{byPidName: Map, byName: Map}|null}
  */
 function buildDirectoryMap(directoryUrl) {
   let directorySpreadsheet;
-  
-  // Try opening by URL, then by ID, for flexibility
+
+  // Try opening by URL, then by ID
   try {
     directorySpreadsheet = SpreadsheetApp.openByUrl(directoryUrl);
   } catch (e) {
@@ -74,55 +110,79 @@ function buildDirectoryMap(directoryUrl) {
     return null;
   }
 
-  const directoryMap = {};
   const lastRow = dirSheet.getLastRow();
-  
-  // Check if there is any data to read
   if (lastRow < 2) {
-     Logger.log('Directory sheet is empty (no data found after row 1).');
-     return directoryMap; // Return an empty map
+    Logger.log('Directory sheet is empty (no data found after row 1).');
+    return { byPidName: new Map(), byName: new Map() };
   }
-  
-  // Get all data from Col C (Last Name) to Col H (Age). This is 6 columns.
-  const range = dirSheet.getRange(2, 3, lastRow - 1, 6); // Starts at C2, goes to H[lastRow]
-  const values = range.getValues();
 
-  for (const row of values) {
-    const lastName = row[0];  // Col C (index 0)
-    const firstName = row[1]; // Col D (index 1)
-    const gender = row[2];    // Col E (index 2)
-    const lineage = row[3];   // Col F (index 3)
-    const age = row[5];       // Col H (index 5)
+  // Read C:H (6 columns): C=Last, D=First, E=Gender, F=Lineage, G=?, H=Age
+  const rangeCH = dirSheet.getRange(2, 3, lastRow - 1, 6);
+  const valuesCH = rangeCH.getValues();
 
-    // Only add to map if we have a valid first and last name
-    if (lastName && firstName) {
-      const normLast = normalizeString(lastName);
-      const firstNameStr = String(firstName);
-      const normFirst = normalizeString(firstNameStr.split(' ')[0]); 
-      
-      const key = normLast + '_' + normFirst;
-      
-      // Avoid adding blank keys or partial keys
-      if (normLast && normFirst && key !== '_') {
-        directoryMap[key] = {
-          gender: gender,
-          lineage: lineage,
-          age: age
-        };
+  // Read Z: Z=Personal ID
+  const rangeZ = dirSheet.getRange(2, 26, lastRow - 1, 1);
+  const valuesZ = rangeZ.getValues();
+
+  const byPidName = new Map();
+  const byName = new Map();
+
+  for (let i = 0; i < valuesCH.length; i++) {
+    const rowCH = valuesCH[i];
+
+    const pid = valuesZ[i][0];     // Col Z
+    const lastName = rowCH[0];     // Col C
+    const firstName = rowCH[1];    // Col D
+    const gender = rowCH[2];       // Col E
+    const lineage = rowCH[3];      // Col F
+    const age = rowCH[5];          // Col H
+
+    if (!lastName && !firstName && !pid) continue;
+
+    const normLast = normalizeString(lastName);
+    const firstNameStr = String(firstName || '');
+    const normFirst = normalizeString(firstNameStr.split(' ')[0]);
+
+    if (!normLast || !normFirst) continue;
+
+    const nameKey = normLast + '_' + normFirst;
+
+    // Fallback map (name-only)
+    if (!byName.has(nameKey)) {
+      byName.set(nameKey, { gender: gender, lineage: lineage, age: age });
+    }
+
+    // Primary map (PID + name)
+    const pidStr = String(pid || '').trim();
+    if (pidStr) {
+      const pidNameKey = pidStr + '_' + nameKey;
+      if (!byPidName.has(pidNameKey)) {
+        byPidName.set(pidNameKey, { gender: gender, lineage: lineage, age: age });
       }
     }
   }
-  return directoryMap;
+
+  return { byPidName: byPidName, byName: byName };
 }
 
 /**
  * Processes a single sheet ('Sunday Service' or 'Event Attendance') to update member status.
- * @param {Spreadsheet} ss The active spreadsheet object.
- * @param {string} sheetName The name of the sheet to process.
- * @param {number} startRow The first row containing data.
- * @param {Object} directoryMap The lookup map of directory members.
+ *
+ * Assumed layout for these tabs:
+ *   B = Personal ID
+ *   C = Last Name
+ *   D = First Name
+ *   E = Gender
+ *   F = Lineage
+ *   G = Age
+ *   H = Type
+ *
+ * @param {Spreadsheet} ss
+ * @param {string} sheetName
+ * @param {number} startRow
+ * @param {{byPidName: Map, byName: Map}} directoryLookup
  */
-function processSheet(ss, sheetName, startRow, directoryMap) {
+function processSheet(ss, sheetName, startRow, directoryLookup) {
   const sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     Logger.log(`Warning: Sheet '${sheetName}' not found. Skipping.`);
@@ -135,70 +195,219 @@ function processSheet(ss, sheetName, startRow, directoryMap) {
     return;
   }
 
-  // Define the range to read and write: Col C (Last) to Col H (Type)
+  // Read/write B:H (7 columns)
   const numRows = lastRow - startRow + 1;
-  const numCols = 6; // C, D, E, F, G, H
-  const range = sheet.getRange(startRow, 3, numRows, numCols); 
+  const numCols = 7; // B, C, D, E, F, G, H
+  const range = sheet.getRange(startRow, 2, numRows, numCols);
   const values = range.getValues();
 
   let membersFound = 0;
   let guestsFound = 0;
 
-  // Loop through all rows in memory
   for (let i = 0; i < values.length; i++) {
-    const lastName = values[i][0];  // Col C (index 0)
-    const firstName = values[i][1]; // Col D (index 1)
-    let key = '';
-    let match = null; // Store the match result
+    const pid = values[i][0];       // Col B
+    const lastName = values[i][1];  // Col C
+    const firstName = values[i][2]; // Col D
 
-    // Skip if name cells are blank
+    // If name cells are blank, mark as Guest (Type col H) and continue
     if (!lastName && !firstName) {
-      values[i][5] = 'Guest'; // Set Col H to Guest
+      values[i][6] = 'Guest'; // Col H
       guestsFound++;
       continue;
     }
-    
-    // Build the key from the separate Last and First name columns
-    const normLast = normalizeString(lastName);
-    const firstNameStr = String(firstName);
-    const normFirst = normalizeString(firstNameStr.split(' ')[0]); 
 
-    if (normLast && normFirst && key !== '_') {
-        key = normLast + '_' + normFirst;
-        match = directoryMap[key]; // Look up the key
+    const normLast = normalizeString(lastName);
+    const firstNameStr = String(firstName || '');
+    const normFirst = normalizeString(firstNameStr.split(' ')[0]);
+
+    let match = null;
+
+    if (normLast && normFirst) {
+      const nameKey = normLast + '_' + normFirst;
+
+      const pidStr = String(pid || '').trim();
+      if (pidStr) {
+        const pidNameKey = pidStr + '_' + nameKey;
+        match = directoryLookup.byPidName.get(pidNameKey) || null;
+      }
+
+      if (!match) {
+        match = directoryLookup.byName.get(nameKey) || null;
+      }
+
+      if (sheetName === 'Sunday Service' && i === 0) {
+        Logger.log(
+          `[${sheetName}] First generated keys: pid="${String(pid || '').trim()}", nameKey="${nameKey}"`
+        );
+      }
     }
-    
-    // Log the first key on the 'Sunday Service' sheet for debugging
-    if (sheetName === 'Sunday Service' && i === 0) {
-      Logger.log(`[${sheetName}] First generated key: '${key}' (from name: '${lastName}, ${firstName}')`);
-    }
-    
-    // --- This section now works for the new structure ---
+
     if (match) {
-      // Found: Update all fields
-      values[i][2] = match.gender;  // Col E
-      values[i][3] = match.lineage; // Col F
-      values[i][4] = match.age;     // Col G
-      values[i][5] = 'Member';      // Col H
+      // Found: Update E, F, G, H
+      values[i][3] = match.gender;  // Col E
+      values[i][4] = match.lineage; // Col F
+      values[i][5] = match.age;     // Col G
+      values[i][6] = 'Member';      // Col H
       membersFound++;
     } else {
-      // Not Found: Mark as Guest, existing E, F, G data is preserved
-      values[i][5] = 'Guest';       // Col H
+      // Not Found: Mark as Guest; preserve existing E/F/G
+      values[i][6] = 'Guest';       // Col H
       guestsFound++;
     }
   }
 
-  // Write all the updated values back to the sheet in one operation
   range.setValues(values);
 
-  // --- Alignment updates (exactly as requested) ---
-  // Vertically center all columns C:H
-  sheet.getRange(startRow, 3, numRows, 6).setVerticalAlignment('middle');
-  // Horizontally align C:D to left
-  sheet.getRange(startRow, 3, numRows, 2).setHorizontalAlignment('left');
-  // Horizontally align E:H to center
-  sheet.getRange(startRow, 5, numRows, 4).setHorizontalAlignment('center');
+  // --- Alignment updates (kept exactly as your original logic, applied to C:H) ---
+  sheet.getRange(startRow, 3, numRows, 6).setVerticalAlignment('middle');     // C:H
+  sheet.getRange(startRow, 3, numRows, 2).setHorizontalAlignment('left');     // C:D
+  sheet.getRange(startRow, 5, numRows, 4).setHorizontalAlignment('center');   // E:H
 
+  Logger.log(`Processed ${numRows} rows for '${sheetName}'. Found: ${membersFound} Members, ${guestsFound} Guests.`);
+}
+
+/**
+ * Processes the 'Attendance Log' sheet to tag Member/Guest in column E.
+ *
+ * Assumed layout:
+ *   B = Personal ID
+ *   C = Last Name
+ *   D = First Name
+ *   E = Member/Guest
+ *
+ * @param {Spreadsheet} ss
+ * @param {string} sheetName
+ * @param {number} startRow
+ * @param {{byPidName: Map, byName: Map}} directoryLookup
+ */
+function processAttendanceLog(ss, sheetName, startRow, directoryLookup) {
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    Logger.log(`Warning: Sheet '${sheetName}' not found. Skipping Attendance Log processing.`);
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) {
+    Logger.log(`Sheet '${sheetName}' has no data to process starting from row ${startRow}.`);
+    return;
+  }
+
+  // Read/write B:E (4 columns): PID, Last, First, Type
+  const numRows = lastRow - startRow + 1;
+  const range = sheet.getRange(startRow, 2, numRows, 4);
+  const values = range.getValues();
+
+  let membersFound = 0;
+  let guestsFound = 0;
+
+  for (let i = 0; i < values.length; i++) {
+    const pid = values[i][0];       // Col B
+    const lastName = values[i][1];  // Col C
+    const firstName = values[i][2]; // Col D
+
+    // If both name cells are blank, skip (do not overwrite Type)
+    if (!lastName && !firstName) continue;
+
+    const normLast = normalizeString(lastName);
+    const firstNameStr = String(firstName || '');
+    const normFirst = normalizeString(firstNameStr.split(' ')[0]);
+
+    let match = null;
+
+    if (normLast && normFirst) {
+      const nameKey = normLast + '_' + normFirst;
+
+      const pidStr = String(pid || '').trim();
+      if (pidStr) {
+        const pidNameKey = pidStr + '_' + nameKey;
+        match = directoryLookup.byPidName.get(pidNameKey) || null;
+      }
+
+      if (!match) {
+        match = directoryLookup.byName.get(nameKey) || null;
+      }
+    }
+
+    if (match) {
+      values[i][3] = 'Member'; // Col E
+      membersFound++;
+    } else {
+      values[i][3] = 'Guest';  // Col E
+      guestsFound++;
+    }
+  }
+
+  range.setValues(values);
+  Logger.log(`Processed ${numRows} rows for '${sheetName}'. Found: ${membersFound} Members, ${guestsFound} Guests.`);
+}
+
+/**
+ * Updates AppSheet tabs:
+ *   Last = B, First = C, Gender = D, Lineage = E, Age = F, Type = G
+ *
+ * Matching used: name-only (Last+First) against Directory (fallback map).
+ *
+ * @param {Spreadsheet} ss
+ * @param {string} sheetName
+ * @param {number} startRow
+ * @param {{byPidName: Map, byName: Map}} directoryLookup
+ */
+function processAppSheetTab(ss, sheetName, startRow, directoryLookup) {
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    Logger.log(`Warning: Sheet '${sheetName}' not found. Skipping.`);
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) {
+    Logger.log(`Sheet '${sheetName}' has no data to process starting from row ${startRow}.`);
+    return;
+  }
+
+  // Read/write B:G (6 columns)
+  const numRows = lastRow - startRow + 1;
+  const range = sheet.getRange(startRow, 2, numRows, 6);
+  const values = range.getValues();
+
+  let membersFound = 0;
+  let guestsFound = 0;
+
+  for (let i = 0; i < values.length; i++) {
+    const lastName = values[i][0];  // Col B
+    const firstName = values[i][1]; // Col C
+
+    if (!lastName && !firstName) {
+      // If blank names, do not overwrite other fields; just set type
+      values[i][5] = 'Guest'; // Col G
+      guestsFound++;
+      continue;
+    }
+
+    const normLast = normalizeString(lastName);
+    const firstNameStr = String(firstName || '');
+    const normFirst = normalizeString(firstNameStr.split(' ')[0]);
+
+    let match = null;
+    if (normLast && normFirst) {
+      const nameKey = normLast + '_' + normFirst;
+      match = directoryLookup.byName.get(nameKey) || null;
+    }
+
+    if (match) {
+      values[i][2] = match.gender;  // Col D
+      values[i][3] = match.lineage; // Col E
+      values[i][4] = match.age;     // Col F
+      values[i][5] = 'Member';      // Col G
+      membersFound++;
+    } else {
+      values[i][5] = 'Guest';       // Col G
+      guestsFound++;
+    }
+  }
+
+  range.setValues(values);
   Logger.log(`Processed ${numRows} rows for '${sheetName}'. Found: ${membersFound} Members, ${guestsFound} Guests.`);
 }
 
