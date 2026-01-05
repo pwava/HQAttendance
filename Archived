@@ -76,27 +76,46 @@ function deleteArchivedFromAttendanceTabs() {
     return;
   }
 
-  var archValues = archivedSheet
+    var archValues = archivedSheet
     .getRange(ARCH_START_ROW, 1, lastRowArch - ARCH_START_ROW + 1, archivedSheet.getLastColumn())
     .getValues();
+
+  var COL_FLAG = 0; // Column A = status/flag
 
   var archivedNameSet = {};
   for (var i = 0; i < archValues.length; i++) {
     var row = archValues[i];
-    var key = createNameKeyForArchived_(row[COL_LAST_NAME], row[COL_FIRST_NAME]);
-    if (key) archivedNameSet[key] = true;
+
+    var flag = (row[COL_FLAG] || '').toString().trim().toUpperCase();
+
+    // Decide if this archived row should be used to delete from attendance tabs
+    var includeForDeletion = false;
+
+    if (!flag) {
+      // No status written yet → treat as normal archived → delete from attendance
+      includeForDeletion = true;
+    } else if (flag === 'PERMANENTLY ARCHIVED BECAUSE ASCENDED') {
+      // Ascended → permanently archived → delete from attendance
+      includeForDeletion = true;
+    } else if (
+      flag === 'RETURNED TO DIRECTORY BECAUSE ACTIVE AGAIN OR NEW MEMBER' ||
+      flag === 'DUPLICATE ARCHIVED RECORD - IGNORE THIS ROW, KEEP THE FIRST ONE' ||
+      flag === 'ALREADY IN DIRECTORY - NO ACTION NEEDED'
+    ) {
+      // These should NOT cause deletion from attendance → skip
+      includeForDeletion = false;
+    }
+
+    if (includeForDeletion) {
+      var key = createNameKeyForArchived_(row[COL_LAST_NAME], row[COL_FIRST_NAME]);
+      if (key) archivedNameSet[key] = true;
+    }
   }
 
-  var archivedCount = Object.keys(archivedNameSet).length;
-  Logger.log("Number of archived names loaded: " + archivedCount);
-  if (archivedCount === 0) {
-    Logger.log("No valid name keys. Nothing deleted.");
-    return;
-  }
 
   var totalDeleted = 0;
 
-  // FAST helper: filter data in memory and rewrite, instead of deleteRow()
+  // NEW helper: actually delete rows (like right-click → Delete row)
   function deleteRowsByNameKey_(sheet, startRow, lastNameCol, firstNameCol, sheetName) {
     if (!sheet) {
       Logger.log(sheetName + " TAB NOT FOUND - skipped.");
@@ -116,29 +135,24 @@ function deleteArchivedFromAttendanceTabs() {
     var lnIndex = lastNameCol - 1;   // because range starts at column 1
     var fnIndex = firstNameCol - 1;
 
-    var keepRows = [];
-    var deletedCount = 0;
+    var rowsToDelete = [];
 
     for (var r = 0; r < data.length; r++) {
       var row = data[r];
       var key = createNameKeyForArchived_(row[lnIndex], row[fnIndex]);
 
       if (key && archivedNameSet[key]) {
-        deletedCount++;
-      } else {
-        keepRows.push(row);
+        rowsToDelete.push(startRow + r);  // store absolute row number
       }
     }
 
-    if (deletedCount > 0) {
-      sheet.getRange(startRow, 1, numRows, lastCol).clearContent();
-      if (keepRows.length > 0) {
-        sheet.getRange(startRow, 1, keepRows.length, lastCol).setValues(keepRows);
-      }
+    // delete from bottom to top so row numbers stay valid
+    for (var i = rowsToDelete.length - 1; i >= 0; i--) {
+      sheet.deleteRow(rowsToDelete[i]);
     }
 
-    Logger.log(sheetName + " - deleted: " + deletedCount);
-    return deletedCount;
+    Logger.log(sheetName + " - deleted: " + rowsToDelete.length);
+    return rowsToDelete.length;
   }
 
   totalDeleted += deleteRowsByNameKey_(ss.getSheetByName('Appsheet Sunserv'), 2, 2, 3, "Appsheet Sunserv");
